@@ -1,0 +1,15 @@
+{
+  "periods": {
+    "487866": {
+      "status": "paid",
+      "updated_at": "2025-08-27T19:00:18.679Z",
+      "txHash": "0x81f1c41f01c9e2d420a51e5a7a7b293867ffaeacd3606b7aaa2bebc38bef2146",
+      "payouts": [
+        {
+          "to": "0x9ACB85e48eE65018D14913eD4bEFdCd3517680ad",
+          "amount": "80000000000000"
+        }
+      ]
+    }
+  }
+}

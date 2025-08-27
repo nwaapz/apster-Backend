@@ -65,6 +65,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get("/", (req, res) => {
+  res.send("✅ Backend is running!");
+});
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/api/period", (req, res) => {
@@ -244,6 +248,9 @@ cron.schedule(CRON_SCHEDULE, async () => {
     console.error("Cron error:", err);
   }
 }, { timezone: "UTC" });
+
+
+
 
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT} (DURATION_MS=${DURATION_MS}, CRON='${CRON_SCHEDULE}')`);
