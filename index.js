@@ -69,6 +69,22 @@ app.get("/", (req, res) => {
   res.send("✅ Backend is running!");
 });
 
+// POST /api/submit-score
+// Body: { user: string, email?: string, score: number }
+// POST /api/submit-score (temporary logging)
+app.post("/api/submit-score", (req, res) => {
+  try {
+    const { user, email, score } = req.body;
+    console.log("Submit score received:", { user, email, score, timestamp: new Date().toISOString() });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Submit score error:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/api/period", (req, res) => {
