@@ -83,7 +83,25 @@ app.post("/api/submit-score", (req, res) => {
   }
 });
 
-
+app.get("/create-db", async (req, res) => {
+  try {
+    const createTableSQL = `
+      CREATE TABLE IF NOT EXISTS player_scores (
+        id SERIAL PRIMARY KEY,
+        user_address VARCHAR(42) NOT NULL,
+        email VARCHAR(255),
+        highest_score INT NOT NULL,
+        last_updated TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_address)
+      )
+    `;
+    await client.query(createTableSQL);
+    res.send({ ok: true, message: "Table created or already exists." });
+  } catch (err) {
+    console.error("Error creating table:", err);
+    res.status(500).send({ ok: false, error: err.message });
+  }
+});
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
