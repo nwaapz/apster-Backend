@@ -98,26 +98,41 @@ app.get("/", (req, res) => {
 // Body: { user: string, email?: string|null, score: number }
 app.post("/api/submit-score", async (req, res) => {
   try {
-    const { user, email, score } = req.body;
+    const { user: rawUser, email: rawEmail, score } = req.body;
 
-    // Basic validation
-    if (!user || typeof user !== "string") {
+    // Basic validation + normalize
+    if (!rawUser || typeof rawUser !== "string") {
       return res.status(400).json({ ok: false, error: "Missing/invalid user address" });
     }
+    const user = rawUser.trim().toLowerCase();
+
     const parsedScore = Number(score);
     if (!Number.isFinite(parsedScore)) {
       return res.status(400).json({ ok: false, error: "Missing/invalid score" });
     }
+    const intScore = Math.floor(parsedScore);
+
+    let email = null;
+    if (rawEmail && typeof rawEmail === "string") {
+      const candidate = rawEmail.trim();
+      // basic email regex (not perfect, but catches obvious problems)
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (emailRe.test(candidate)) email = candidate.toLowerCase();
+    }
 
     const timestamp = new Date().toISOString();
-    console.log("Submit score received:", { user, email: email ?? null, score: parsedScore, timestamp });
+    console.log("Submit score received:", { user, email, score: intScore, timestamp });
 
-    // If no DB configured, return success but log
     if (!pool) {
       return res.json({ ok: true, warning: "DB not configured; submission logged only." });
     }
 
-    // Upsert to keep only highest score per user_address
+    // Get current highest (so we can report whether this was a new high)
+    const getQ = `SELECT highest_score FROM player_scores WHERE user_address = $1 LIMIT 1`;
+    const getRes = await pool.query(getQ, [user]);
+    const prev = getRes.rows[0]?.highest_score ?? null;
+
+    // Upsert keeping highest
     const upsertQuery = `
       INSERT INTO player_scores (user_address, email, highest_score)
       VALUES ($1, $2, $3)
@@ -128,10 +143,13 @@ app.post("/api/submit-score", async (req, res) => {
         last_updated = NOW()
       RETURNING *;
     `;
-    const values = [user, email || null, parsedScore];
-
+    const values = [user, email || null, intScore];
     const result = await pool.query(upsertQuery, values);
-    return res.json({ ok: true, data: result.rows[0] });
+    const saved = result.rows[0];
+
+    const newHigh = prev === null ? true : saved.highest_score > prev;
+
+    return res.json({ ok: true, newHigh, previous: prev, saved });
   } catch (err) {
     console.error("Submit score error:", err);
     return res.status(500).json({ ok: false, error: String(err) });
