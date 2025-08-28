@@ -6,6 +6,8 @@ import path from "path";
 import cors from "cors";
 import dotenv from "dotenv";
 import { ethers } from "ethers";
+import pkg from "pg";
+const { Pool } = pkg;
 
 dotenv.config();
 
@@ -18,6 +20,7 @@ let PRIVATE_KEY = process.env.PRIVATE_KEY;
 const HOUSE_FEE_BPS = Number(process.env.HOUSE_FEE_BPS || 100);
 const TOP_N = Number(process.env.TOP_N || 3);
 
+// basic env check (keep it as you had it)
 if (!CONTRACT_ADDRESS || !RPC_URL || !PRIVATE_KEY) {
   console.error("Please set CONTRACT_ADDRESS, RPC_URL and PRIVATE_KEY in .env");
   process.exit(1);
@@ -39,7 +42,7 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, contractJson.abi, ownerWallet);
 
-// Simple JSON DB file for dev
+// Simple JSON DB file for dev (keeps your existing behaviour)
 const DB_FILE = path.resolve("./periods.json");
 function readDBSync() {
   try {
@@ -60,6 +63,28 @@ function computePeriod(ts = Date.now()) {
   return { periodIndex, periodStart, periodEnd };
 }
 
+// ---------- Postgres pool (optional) ----------
+let pool = null;
+if (process.env.DATABASE_URL) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }, // Render requires TLS
+  });
+
+  pool
+    .connect()
+    .then((client) => {
+      client.release();
+      console.log("Connected to Postgres");
+    })
+    .catch((err) => {
+      console.error("Postgres connection error:", err);
+      // keep pool as-is; queries will fail if attempted
+    });
+} else {
+  console.log("DATABASE_URL not set — DB routes are disabled (will just log).");
+}
+
 // Express server
 const app = express();
 app.use(cors());
@@ -70,21 +95,56 @@ app.get("/", (req, res) => {
 });
 
 // POST /api/submit-score
-// Body: { user: string, email?: string, score: number }
-// POST /api/submit-score (temporary logging)
-app.post("/api/submit-score", (req, res) => {
+// Body: { user: string, email?: string|null, score: number }
+app.post("/api/submit-score", async (req, res) => {
   try {
     const { user, email, score } = req.body;
-    console.log("Submit score received:", { user, email, score, timestamp: new Date().toISOString() });
-    return res.json({ ok: true });
+
+    // Basic validation
+    if (!user || typeof user !== "string") {
+      return res.status(400).json({ ok: false, error: "Missing/invalid user address" });
+    }
+    const parsedScore = Number(score);
+    if (!Number.isFinite(parsedScore)) {
+      return res.status(400).json({ ok: false, error: "Missing/invalid score" });
+    }
+
+    const timestamp = new Date().toISOString();
+    console.log("Submit score received:", { user, email: email ?? null, score: parsedScore, timestamp });
+
+    // If no DB configured, return success but log
+    if (!pool) {
+      return res.json({ ok: true, warning: "DB not configured; submission logged only." });
+    }
+
+    // Upsert to keep only highest score per user_address
+    const upsertQuery = `
+      INSERT INTO player_scores (user_address, email, highest_score)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (user_address)
+      DO UPDATE SET
+        highest_score = GREATEST(player_scores.highest_score, EXCLUDED.highest_score),
+        email = COALESCE(EXCLUDED.email, player_scores.email),
+        last_updated = NOW()
+      RETURNING *;
+    `;
+    const values = [user, email || null, parsedScore];
+
+    const result = await pool.query(upsertQuery, values);
+    return res.json({ ok: true, data: result.rows[0] });
   } catch (err) {
     console.error("Submit score error:", err);
-    return res.status(500).json({ error: String(err) });
+    return res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
+// Route to create the DB table (call once)
 app.get("/create-db", async (req, res) => {
   try {
+    if (!pool) {
+      return res.status(500).send({ ok: false, error: "DATABASE_URL not configured" });
+    }
+
     const createTableSQL = `
       CREATE TABLE IF NOT EXISTS player_scores (
         id SERIAL PRIMARY KEY,
@@ -93,9 +153,9 @@ app.get("/create-db", async (req, res) => {
         highest_score INT NOT NULL,
         last_updated TIMESTAMP DEFAULT NOW(),
         UNIQUE(user_address)
-      )
+      );
     `;
-    await client.query(createTableSQL);
+    await pool.query(createTableSQL);
     res.send({ ok: true, message: "Table created or already exists." });
   } catch (err) {
     console.error("Error creating table:", err);
@@ -272,19 +332,20 @@ async function processPeriod(periodIndex) {
 }
 
 // Cron schedule - runs at CRON_SCHEDULE (UTC)
-cron.schedule(CRON_SCHEDULE, async () => {
-  try {
-    const ts = Date.now() - 1000;
-    const { periodIndex } = computePeriod(ts);
-    console.log("Cron triggered for period", periodIndex, new Date().toISOString());
-    await processPeriod(periodIndex);
-  } catch (err) {
-    console.error("Cron error:", err);
-  }
-}, { timezone: "UTC" });
-
-
-
+cron.schedule(
+  CRON_SCHEDULE,
+  async () => {
+    try {
+      const ts = Date.now() - 1000;
+      const { periodIndex } = computePeriod(ts);
+      console.log("Cron triggered for period", periodIndex, new Date().toISOString());
+      await processPeriod(periodIndex);
+    } catch (err) {
+      console.error("Cron error:", err);
+    }
+  },
+  { timezone: "UTC" }
+);
 
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT} (DURATION_MS=${DURATION_MS}, CRON='${CRON_SCHEDULE}')`);
