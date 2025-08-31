@@ -1,4 +1,3 @@
-// index.js
 import express from "express";
 import cron from "node-cron";
 import fs from "fs";
@@ -13,6 +12,7 @@ import {
   processPeriod,
   normalizeProfileName
 } from "./leaderboard.js";
+import registerAdminRoutes from "./adminRoutes.js"; // Added import for admin routes
 
 dotenv.config();
 
@@ -27,6 +27,7 @@ const TOP_N = Number(process.env.TOP_N || 3);
 const DB_FILE = path.resolve(process.env.DB_FILE || "./periods.json");
 const FLUSH_INTERVAL_MS = Number(process.env.FLUSH_INTERVAL_MS || 20000);
 const GAS_LIMIT = Number(process.env.GAS_LIMIT || 2_000_000);
+const ADMIN_SECRET = process.env.ADMIN_SECRET || null; // Added for admin routes
 
 if (!CONTRACT_ADDRESS || !RPC_URL || !PRIVATE_KEY) {
   console.error("Set CONTRACT_ADDRESS, RPC_URL, PRIVATE_KEY in .env");
@@ -70,6 +71,10 @@ process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Register admin routes - ADDED THIS LINE
+registerAdminRoutes(app, db, { adminSecret: ADMIN_SECRET });
+
 app.get("/", (req,res) => res.send("✅ Backend running!"));
 
 // Submit score
