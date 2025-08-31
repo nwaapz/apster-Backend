@@ -167,6 +167,50 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     }
   });
 
+// GET set-password form
+app.get("/admin/set-password", (req, res) => {
+  // Check if admin password exists
+  const adminExists = !!(db.admin && db.admin.passwordHash);
+  
+  // If password exists, require authentication
+  if (adminExists && !isAdminAuthed(req)) {
+    return res.redirect("/admin/login");
+  }
+  
+  const html = `<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Set Admin Password</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>body{padding:20px;max-width:700px;margin:auto}</style>
+</head>
+<body>
+  <h3>${adminExists ? "Change" : "Set"} Admin Password</h3>
+  <form method="POST" action="/admin/set-password">
+    ${adminExists ? `
+    <div class="mb-3">
+      <label class="form-label">Current Password</label>
+      <input name="currentPassword" class="form-control" type="password" required />
+    </div>
+    ` : ''}
+    <div class="mb-3">
+      <label class="form-label">New Password</label>
+      <input name="newPassword" class="form-control" type="password" required minlength="6" />
+    </div>
+    <div class="mb-3">
+      <button class="btn btn-primary" type="submit">${adminExists ? "Change" : "Set"} Password</button>
+      <a class="btn btn-outline-secondary" href="/admin/db-view">Cancel</a>
+    </div>
+  </form>
+</body>
+</html>`;
+  
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(html);
+});
+
+
+
   // POST set-password - bootstrapping allowed if no password exists
   // body: { password, currentPassword? } OR urlencoded form
   app.post("/admin/set-password", async (req, res) => {
