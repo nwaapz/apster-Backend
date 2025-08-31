@@ -1,12 +1,23 @@
 // adminRoutes.js
-// Usage: registerAdminRoutes(app, db, { adminSecret: process.env.ADMIN_SECRET || null });
-
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 
 export default function registerAdminRoutes(app, db, opts = {}) {
   const ADMIN_SECRET = opts.adminSecret ?? null;
   const SESSION_TTL_MS = opts.sessionTtlMs ?? 60 * 60 * 1000; // 1 hour
+  const ADMIN_FILE = path.resolve(opts.adminFile || "./admin.json");
+
+  // Load admin data from file
+  let adminData = {};
+  try {
+    if (fs.existsSync(ADMIN_FILE)) {
+      adminData = JSON.parse(fs.readFileSync(ADMIN_FILE, 'utf8'));
+    }
+  } catch (err) {
+    console.error("Error reading admin file:", err);
+  }
 
   // --- Helpers ---
   function getCookie(req, name) {
@@ -18,6 +29,15 @@ export default function registerAdminRoutes(app, db, opts = {}) {
       if (k === name) return rest.join("=");
     }
     return null;
+  }
+
+  // Save admin data to file
+  function saveAdminData() {
+    try {
+      fs.writeFileSync(ADMIN_FILE, JSON.stringify(adminData, null, 2));
+    } catch (err) {
+      console.error("Error writing admin file:", err);
+    }
   }
 
   // Check admin auth: either valid session token cookie OR ADMIN_SECRET header/query
@@ -145,13 +165,12 @@ export default function registerAdminRoutes(app, db, opts = {}) {
       }
       if (!password) return res.status(400).send("Missing password");
 
-      // check stored hash
-      db.admin = db.admin || {};
-      const hash = db.admin.passwordHash;
-      if (!hash) {
+      // check stored hash from file
+      if (!adminData.passwordHash) {
         return res.status(400).send("No admin password set. Use /admin/set-password to create one or set ADMIN_SECRET.");
       }
-      const ok = bcrypt.compareSync(String(password), hash);
+      
+      const ok = bcrypt.compareSync(String(password), adminData.passwordHash);
       if (!ok) return res.status(403).send("Invalid password");
 
       // create session token
@@ -167,17 +186,17 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     }
   });
 
-// GET set-password form
-app.get("/admin/set-password", (req, res) => {
-  // Check if admin password exists
-  const adminExists = !!(db.admin && db.admin.passwordHash);
-  
-  // If password exists, require authentication
-  if (adminExists && !isAdminAuthed(req)) {
-    return res.redirect("/admin/login");
-  }
-  
-  const html = `<!doctype html>
+  // GET set-password form
+  app.get("/admin/set-password", (req, res) => {
+    // Check if admin password exists
+    const adminExists = !!adminData.passwordHash;
+    
+    // If password exists, require authentication
+    if (adminExists && !isAdminAuthed(req)) {
+      return res.redirect("/admin/login");
+    }
+    
+    const html = `<!doctype html>
 <html>
 <head><meta charset="utf-8"><title>Set Admin Password</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -204,22 +223,19 @@ app.get("/admin/set-password", (req, res) => {
   </form>
 </body>
 </html>`;
-  
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.send(html);
-});
-
-
+    
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
+  });
 
   // POST set-password - bootstrapping allowed if no password exists
-  // body: { password, currentPassword? } OR urlencoded form
   app.post("/admin/set-password", async (req, res) => {
     try {
       // Authorization: allow if any of:
       // - ADMIN_SECRET matches header/query
       // - already authenticated session (isAdminAuthed)
       // - OR no password exists yet (bootstrapping)
-      const adminExists = !!(db.admin && db.admin.passwordHash);
+      const adminExists = !!adminData.passwordHash;
       if (!adminExists || isAdminAuthed(req)) {
         // read body
         const raw = await readBody(req);
@@ -239,8 +255,7 @@ app.get("/admin/set-password", (req, res) => {
 
         // If admin exists, verify currentPassword
         if (adminExists) {
-          const storedHash = db.admin.passwordHash;
-          if (!currentPassword || !bcrypt.compareSync(String(currentPassword), storedHash)) {
+          if (!currentPassword || !bcrypt.compareSync(String(currentPassword), adminData.passwordHash)) {
             return res.status(403).json({ ok: false, error: "Current password required or invalid" });
           }
         }
@@ -248,8 +263,8 @@ app.get("/admin/set-password", (req, res) => {
         // set new hash
         const salt = bcrypt.genSaltSync(10);
         const hash = bcrypt.hashSync(String(newPassword), salt);
-        db.admin = db.admin || {};
-        db.admin.passwordHash = hash;
+        adminData.passwordHash = hash;
+        saveAdminData();
 
         return res.json({ ok: true, message: adminExists ? "Password changed" : "Password set" });
       } else {
@@ -304,7 +319,7 @@ app.get("/admin/set-password", (req, res) => {
     const periodRows = Object.entries(snapshot.periods).map(([idx, p]) => ({
       periodIndex: idx,
       status: p.status || "",
-      txHash: p.txHash || "",
+      txHash: p.txHash || "",  // Correct: using colon for object property
       payouts: p.payouts ? JSON.stringify(p.payouts, null, 0) : "",
       error: p.error || "",
       updated_at: p.updated_at || ""
@@ -373,7 +388,7 @@ app.get("/admin/set-password", (req, res) => {
       scores: db.scores || {},
       periods: db.periods || {},
       profileNames: db.profileNames || {},
-      admin: { hasPassword: !!(db.admin && db.admin.passwordHash) }
+      admin: { hasPassword: !!adminData.passwordHash }
     }, null, 2));
   });
 }
