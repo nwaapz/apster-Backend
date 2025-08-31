@@ -17,7 +17,7 @@ dotenv.config();
 
 // ------------------- Config -------------------
 const PORT = Number(process.env.PORT || 3001);
-const DURATION_MS = Number(process.env.DURATION_MS) || 1000 * 60 * 60; // 1 hour default
+const DURATION_MS = Number(process.env.DURATION_MS) || 1000 * 60 * 60; // default 1 hour
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "0 * * * *";
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 const RPC_URL = process.env.RPC_URL;
@@ -47,14 +47,12 @@ const ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, contractJson.abi, ownerWallet);
 
 // ------------------- In-memory DB -------------------
-// Ensure DB file exists (readDBSync returns defaults if missing)
 let db = readDBSync(DB_FILE);
 db.scores = db.scores || {};
 db.periods = db.periods || {};
+db.profileNames = db.profileNames || {}; // normalized_name -> addr
 
-// Flag to indicate a flush is in progress (prevents concurrent disk writes)
 let flushing = false;
-
 function tryFlushSync() {
   if (flushing) return;
   flushing = true;
@@ -67,16 +65,13 @@ function tryFlushSync() {
     flushing = false;
   }
 }
-
-// Periodic flush
 const flushInterval = setInterval(tryFlushSync, FLUSH_INTERVAL_MS);
 
-// Flush on shutdown (SIGINT / SIGTERM)
-async function gracefulShutdown(signal) {
+// graceful shutdown
+function gracefulShutdown(signal) {
   console.log(`\n📛 Received ${signal}. Flushing DB and exiting...`);
   clearInterval(flushInterval);
   tryFlushSync();
-  // small delay to ensure logs show up
   setTimeout(() => process.exit(0), 250);
 }
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
@@ -92,48 +87,79 @@ app.get("/", (req, res) => res.send("✅ Backend is running!"));
 // Submit score (memory-only)
 app.post("/api/submit-score", (req, res) => {
   try {
-    const { user, email, score } = req.body;
+    const { user, email, score, profile_name } = req.body;
     if (!user || score === undefined || score === null) {
       return res.status(400).json({ ok: false, error: "Missing user or score" });
     }
 
     const addr = String(user).trim().toLowerCase();
+    if (!addr) return res.status(400).json({ ok: false, error: "Invalid user" });
+
     const intScore = Math.floor(Number(score) || 0);
 
     db.scores = db.scores || {};
     const existing = db.scores[addr];
 
-    if (!existing || intScore > existing.highest_score) {
+    // Ensure skeleton
+    if (!existing) {
       db.scores[addr] = {
         user_address: addr,
-        email: email?.trim() || null,
-        highest_score: intScore,
+        email: null,
+        profile_name: null,
+        highest_score: 0,
+        games_played: 0,
+        last_score: null,
         last_updated: new Date().toISOString()
       };
-      // we don't write to disk here; periodic flush will persist
     }
 
-    res.json({ ok: true, saved: db.scores[addr] });
+    // Optional: allow updating profile_name through submit-score only if provided and passes validation.
+    if (profile_name !== undefined && profile_name !== null) {
+      const raw = String(profile_name).trim();
+      const MAX_LEN = 32;
+      const allowed = /^[\p{L}\p{N}\s\-_]+$/u;
+      if (raw.length === 0 || raw.length > MAX_LEN) {
+        return res.status(400).json({ ok: false, error: `profile_name must be 1-${MAX_LEN} characters` });
+      }
+      if (!allowed.test(raw)) {
+        return res.status(400).json({ ok: false, error: "profile_name contains invalid characters" });
+      }
+      // Note: we do NOT change uniqueness/index here — prefer using /api/update-profile for uniqueness-enforced changes.
+      db.scores[addr].profile_name = raw;
+    }
+
+    // update email if provided
+    if (email) db.scores[addr].email = String(email).trim();
+
+    // update gameplay stats
+    db.scores[addr].last_score = intScore;
+    db.scores[addr].games_played = (db.scores[addr].games_played || 0) + 1;
+
+    if (intScore > (db.scores[addr].highest_score || 0)) {
+      db.scores[addr].highest_score = intScore;
+    }
+
+    db.scores[addr].last_updated = new Date().toISOString();
+
+    return res.json({ ok: true, saved: db.scores[addr] });
   } catch (err) {
     console.error("submit-score error:", err);
-    res.status(500).json({ ok: false, error: String(err) });
+    return res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
-// Leaderboard endpoint - returns top N by score
+// Leaderboard endpoint - returns top N by highest_score
 app.get("/api/leaderboard", (req, res) => {
   try {
-    const limit = Math.min(100, Number(req.query.limit || 10)); // cap to 100
+    const limit = Math.min(100, Number(req.query.limit || 10));
     const scores = db.scores || {};
-
     const top = Object.values(scores)
-      .sort((a, b) => b.highest_score - a.highest_score)
+      .sort((a, b) => (b.highest_score || 0) - (a.highest_score || 0))
       .slice(0, limit);
-
-    res.json({ ok: true, count: top.length, leaderboard: top });
+    return res.json({ ok: true, count: top.length, leaderboard: top });
   } catch (err) {
     console.error("leaderboard error:", err);
-    res.status(500).json({ ok: false, error: String(err) });
+    return res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
@@ -143,8 +169,7 @@ app.get("/api/period", (req, res) => {
     const now = Date.now();
     const p = computePeriod(now, DURATION_MS);
     const record = db.periods[p.periodIndex] || null;
-
-    res.json({
+    return res.json({
       periodIndex: p.periodIndex,
       periodStart: p.periodStart,
       periodEnd: p.periodEnd,
@@ -155,7 +180,7 @@ app.get("/api/period", (req, res) => {
     });
   } catch (err) {
     console.error("/api/period error:", err);
-    res.status(500).json({ ok: false, error: String(err) });
+    return res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
@@ -164,22 +189,100 @@ app.post("/api/process-now", async (req, res) => {
   try {
     const ts = Date.now() - 1000;
     const { periodIndex } = computePeriod(ts, DURATION_MS);
-    // processPeriod will mutate db in-memory
     await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit: GAS_LIMIT });
-    res.json({ ok: true, record: db.periods[periodIndex] || null });
+    return res.json({ ok: true, record: db.periods[periodIndex] || null });
   } catch (err) {
     console.error("process-now error:", err);
-    res.status(500).json({ ok: false, error: String(err) });
+    return res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
-// Admin endpoint: force flush to disk right now
+// Update profile name endpoint (uniqueness enforced)
+app.post("/api/update-profile", (req, res) => {
+  try {
+    const { user, profile_name } = req.body;
+
+    if (!user) return res.status(400).json({ ok: false, error: "Missing user (wallet address)" });
+    if (profile_name === undefined || profile_name === null) {
+      return res.status(400).json({ ok: false, error: "Missing profile_name" });
+    }
+
+    const addr = String(user).trim().toLowerCase();
+    if (!addr) return res.status(400).json({ ok: false, error: "Invalid user" });
+
+    const raw = String(profile_name).trim();
+    const MAX_LEN = 32;
+    const allowed = /^[\p{L}\p{N}\s\-_]+$/u;
+
+    if (raw.length === 0 || raw.length > MAX_LEN) {
+      return res.status(400).json({ ok: false, error: `profile_name must be 1-${MAX_LEN} characters` });
+    }
+    if (!allowed.test(raw)) {
+      return res.status(400).json({ ok: false, error: "profile_name contains invalid characters" });
+    }
+
+    db.profileNames = db.profileNames || {};
+    db.scores = db.scores || {};
+
+    const normalized = raw.toLowerCase();
+    const existingOwner = db.profileNames[normalized];
+
+    // If name is taken by another address => conflict
+    if (existingOwner && existingOwner !== addr) {
+      return res.status(409).json({ ok: false, error: "profile_name already exists" });
+    }
+
+    // If already owned by this addr => idempotent success (update display name case)
+    if (existingOwner === addr) {
+      db.scores[addr] = db.scores[addr] || {
+        user_address: addr,
+        email: null,
+        profile_name: raw,
+        highest_score: 0,
+        games_played: 0,
+        last_updated: new Date().toISOString()
+      };
+      db.scores[addr].profile_name = raw;
+      db.scores[addr].last_updated = new Date().toISOString();
+      return res.json({ ok: true, message: "profile_name already set for this user", saved: db.scores[addr] });
+    }
+
+    // Name is free — remove previous name of this user (if any)
+    const prevName = db.scores[addr]?.profile_name;
+    if (prevName) {
+      const prevNorm = String(prevName).toLowerCase();
+      if (db.profileNames[prevNorm] === addr) delete db.profileNames[prevNorm];
+    }
+
+    // Ensure user skeleton then set name and index
+    db.scores[addr] = db.scores[addr] || {
+      user_address: addr,
+      email: null,
+      profile_name: null,
+      highest_score: 0,
+      games_played: 0,
+      last_updated: new Date().toISOString()
+    };
+
+    db.scores[addr].profile_name = raw;
+    db.scores[addr].last_updated = new Date().toISOString();
+    db.profileNames[normalized] = addr;
+
+    return res.json({ ok: true, message: "profile_name set", saved: db.scores[addr] });
+  } catch (err) {
+    console.error("/api/update-profile error:", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+// Admin endpoint: force flush to disk
 app.post("/api/flush-db", (req, res) => {
   try {
     tryFlushSync();
-    res.json({ ok: true, message: "Flush triggered" });
+    return res.json({ ok: true, message: "Flush triggered" });
   } catch (err) {
-    res.status(500).json({ ok: false, error: String(err) });
+    console.error("/api/flush-db error:", err);
+    return res.status(500).json({ ok: false, error: String(err) });
   }
 });
 

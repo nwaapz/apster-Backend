@@ -9,16 +9,20 @@ export function readDBSync(DB_FILE) {
       // ensure directory exists
       const dir = path.dirname(DB_FILE);
       if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const starter = { periods: {}, scores: {} };
-      // write starter atomically
+      const starter = { periods: {}, scores: {}, profileNames: {} };
       writeDBAtomicSync(DB_FILE, starter);
       return starter;
     }
     const raw = fs.readFileSync(DB_FILE, "utf8");
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // ensure fields exist
+    parsed.periods = parsed.periods || {};
+    parsed.scores = parsed.scores || {};
+    parsed.profileNames = parsed.profileNames || {};
+    return parsed;
   } catch (e) {
     console.warn("readDBSync: failed to read/parse DB file, using defaults:", e.message);
-    return { periods: {}, scores: {} };
+    return { periods: {}, scores: {}, profileNames: {} };
   }
 }
 
@@ -29,9 +33,7 @@ export function writeDBAtomicSync(DB_FILE, data) {
   if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
   const text = JSON.stringify(data, null, 2);
-  // write temp file synchronously
   fs.writeFileSync(tmp, text, { encoding: "utf8" });
-  // rename is atomic on most OSes
   fs.renameSync(tmp, DB_FILE);
 }
 
@@ -44,22 +46,18 @@ export function computePeriod(ts, DURATION_MS) {
 }
 
 // Compute winners from on-chain contract
-// Returns winners[], amounts[] (strings), house1, house2, poolBalanceBN (string)
 export async function computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS) {
-  // contract should expose getCurrentPlayers(), getPlayerDeposit(address), poolBalance()
   const players = await contract.getCurrentPlayers();
   if (!players || players.length === 0) return { winners: [], amounts: [], poolBalanceBN: "0" };
 
   const deposits = await Promise.all(
     players.map(async (p) => {
       const d = await contract.getPlayerDeposit(p);
-      // make safe BigInt conversion
       const depositBN = BigInt(d?.toString?.() ?? String(d));
       return { addr: p, deposit: depositBN };
     })
   );
 
-  // sort descending by deposit
   deposits.sort((a, b) => (a.deposit < b.deposit ? 1 : a.deposit > b.deposit ? -1 : 0));
 
   const poolBalanceBN = BigInt((await contract.poolBalance()).toString());
@@ -73,10 +71,8 @@ export async function computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS) 
   else if (TOP_N === 2) split = [60, 40];
   else if (TOP_N === 3) split = [50, 30, 20];
   else {
-    // evenly distribute remaining rounding down
     const base = Math.floor(100 / TOP_N);
     split = Array.from({ length: TOP_N }, () => base);
-    // adjust remainder to first entries
     let rem = 100 - base * TOP_N;
     for (let i = 0; rem > 0 && i < split.length; i++, rem--) split[i] += 1;
   }
@@ -92,7 +88,6 @@ export async function computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS) 
     }
   }
 
-  // house split — configurable if you want; default 50/50
   const w1pct = 50;
   const w2pct = 50;
   const house1 = (houseFeeTotal * BigInt(w1pct)) / 100n;
@@ -108,21 +103,11 @@ export async function computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS) 
 }
 
 // Process period (pay winners, house, reset).
-// contract: ethers.Contract
-// db: in-memory database object (will be mutated)
-// periodIndex: number
-// TOP_N, HOUSE_FEE_BPS: numbers
-// opts: { gasLimit }
 export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, opts = {}) {
   db.periods = db.periods || {};
   const existing = db.periods[periodIndex];
-  // avoid double-processing
-  if (existing?.status === "processing" || existing?.status === "paid") {
-    // no-op
-    return;
-  }
+  if (existing?.status === "processing" || existing?.status === "paid") return;
 
-  // Mark processing synchronously (prevents concurrent calls in same process)
   db.periods[periodIndex] = { status: "processing", updated_at: new Date().toISOString() };
 
   try {
@@ -135,14 +120,11 @@ export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_
     }
 
     const winners = result.winners;
-    // amounts as BigInt (ethers v6 accepts BigInt for numeric params)
     const amounts = result.amounts.map((a) => BigInt(a));
 
-    // Pay winners
     const tx = await contract.payPlayers(winners, amounts, { ...(opts.gasLimit ? { gasLimit: opts.gasLimit } : {}) });
     await tx.wait(1);
 
-    // Pay house portions (if any)
     const h1 = BigInt(result.house1 || "0");
     const h2 = BigInt(result.house2 || "0");
     if (h1 > 0n || h2 > 0n) {
@@ -150,7 +132,6 @@ export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_
       await tx2.wait(1);
     }
 
-    // Reset on-chain payments if required by your contract
     if (typeof contract.resetPayments === "function") {
       const resetTx = await contract.resetPayments();
       if (resetTx?.wait) await resetTx.wait(1);
