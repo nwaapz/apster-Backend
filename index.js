@@ -149,6 +149,29 @@ app.get("/api/leaderboard", (req,res) => {
   return res.json({ ok:true, count: leaderboardCache.length, leaderboard: leaderboardCache.slice(0,limit) });
 });
 
+// Get profile info by wallet address
+app.get("/api/profile/:address", (req, res) => {
+  try {
+    const addr = String(req.params.address).trim().toLowerCase();
+    const record = db.scores[addr] || null;
+
+    if (!record || !record.profile_name) {
+      return res.status(404).json({ ok: false, error: "No profile found" });
+    }
+
+    return res.json({ 
+      ok: true, 
+      user_address: addr, 
+      profile_name: record.profile_name 
+    });
+  } catch (err) {
+    console.error("/api/profile error:", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+
+
 // Period info
 app.get("/api/period", (req,res) => {
   try {
