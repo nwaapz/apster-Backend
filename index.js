@@ -138,8 +138,10 @@ app.post("/api/update-profile", async (req,res) => {
     db.scores[addr].last_updated = new Date().toISOString();
 
     // persist profile name and score
-    await saveProfileName(pool, db, normalized, addr);
+    // persist score first (ensure FK target exists), then profile name
     await saveScore(pool, db, db.scores[addr]);
+    await saveProfileName(pool, db, normalized, addr);
+
 
     return res.json({ ok:true, message:"profile_name set", saved: db.scores[addr] });
   } catch(err) {
