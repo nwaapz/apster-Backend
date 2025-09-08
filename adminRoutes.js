@@ -1,25 +1,57 @@
 // adminRoutes.js
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import fs from "fs";
-import path from "path";
 
 export default function registerAdminRoutes(app, db, opts = {}) {
   const ADMIN_SECRET = opts.adminSecret ?? null;
+  const pool = opts.pool;
   const SESSION_TTL_MS = opts.sessionTtlMs ?? 60 * 60 * 1000; // 1 hour
-  const ADMIN_FILE = path.resolve(opts.adminFile || "./admin.json");
 
-  // Load admin data from file
-  let adminData = {};
-  try {
-    if (fs.existsSync(ADMIN_FILE)) {
-      adminData = JSON.parse(fs.readFileSync(ADMIN_FILE, 'utf8'));
-    }
-  } catch (err) {
-    console.error("Error reading admin file:", err);
+  if (!pool) throw new Error("registerAdminRoutes requires opts.pool (pg Pool)");
+
+  // --- Helper DB functions for admin settings & sessions ---
+  async function loadAdminSettings() {
+    const r = await pool.query(`SELECT v FROM admin_settings WHERE k = 'passwordHash' LIMIT 1`);
+    if (r.rowCount === 0) return { passwordHash: null };
+    const v = r.rows[0].v;
+    return { passwordHash: v?.hash ?? null };
   }
 
-  // --- Helpers ---
+  async function saveAdminSettings(adminData) {
+    // adminData = { passwordHash: '...' }
+    const v = { hash: adminData.passwordHash || null };
+    await pool.query(`
+      INSERT INTO admin_settings(k, v) VALUES('passwordHash', $1)
+      ON CONFLICT(k) DO UPDATE SET v = EXCLUDED.v
+    `, [v]);
+  }
+
+  async function createAdminSession(token, ttlMs) {
+    const created = new Date();
+    const expires = new Date(Date.now() + ttlMs);
+    await pool.query(
+      `INSERT INTO admin_sessions(token, created_at, expires_at) VALUES($1,$2,$3)
+       ON CONFLICT(token) DO UPDATE SET created_at = EXCLUDED.created_at, expires_at = EXCLUDED.expires_at`,
+      [token, created.toISOString(), expires.toISOString()]
+    );
+  }
+
+  async function getAdminSession(token) {
+    if (!token) return null;
+    // Remove expired sessions first (optional)
+    await pool.query(`DELETE FROM admin_sessions WHERE expires_at < NOW()`);
+    const r = await pool.query(`SELECT token, created_at, expires_at FROM admin_sessions WHERE token = $1 LIMIT 1`, [token]);
+    if (r.rowCount === 0) return null;
+    const row = r.rows[0];
+    return { token: row.token, createdAt: new Date(row.created_at).toISOString(), expiresAt: new Date(row.expires_at).toISOString() };
+  }
+
+  async function deleteAdminSession(token) {
+    if (!token) return;
+    await pool.query(`DELETE FROM admin_sessions WHERE token = $1`, [token]);
+  }
+
+  // Cookie helper
   function getCookie(req, name) {
     const header = req.headers?.cookie;
     if (!header) return null;
@@ -31,18 +63,8 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     return null;
   }
 
-  // Save admin data to file
-  function saveAdminData() {
-    try {
-      fs.writeFileSync(ADMIN_FILE, JSON.stringify(adminData, null, 2));
-    } catch (err) {
-      console.error("Error writing admin file:", err);
-    }
-  }
-
-  // Check admin auth: either valid session token cookie OR ADMIN_SECRET header/query
-  function isAdminAuthed(req) {
-    // ADMIN_SECRET (env) bypass - header or query param
+  async function isAdminAuthed(req) {
+    // ADMIN_SECRET bypass - header or query param
     if (ADMIN_SECRET) {
       const header = req.headers["x-admin-secret"];
       const q = req.query?.secret;
@@ -52,12 +74,11 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     // session cookie
     const token = getCookie(req, "admin_auth");
     if (!token) return false;
-    db.adminSessions = db.adminSessions || {};
-    const s = db.adminSessions[token];
+    const s = await getAdminSession(token);
     if (!s) return false;
-    if (s.expiresAt < Date.now()) {
-      // expired, remove it
-      delete db.adminSessions[token];
+    // check expiry
+    if (new Date(s.expiresAt).getTime() < Date.now()) {
+      await deleteAdminSession(token);
       return false;
     }
     return true;
@@ -73,7 +94,6 @@ export default function registerAdminRoutes(app, db, opts = {}) {
       .replaceAll("'", "&#39;");
   }
 
-  // Build table (same as before)
   function buildTable(headers, rows) {
     let html = '<table class="table table-sm table-striped table-bordered"><thead class="table-dark"><tr>';
     for (const h of headers) html += `<th>${htmlEscape(h)}</th>`;
@@ -90,13 +110,19 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     return html;
   }
 
-  // --- Auth / password management routes ---
+  // Read small body helper (no body-parser)
+  async function readBody(req) {
+    return new Promise((resolve, reject) => {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk.toString(); });
+      req.on("end", () => resolve(body));
+      req.on("error", reject);
+    });
+  }
 
-  // GET login form
-  app.get("/admin/login", (req, res) => {
-    // if already authed, redirect to viewer
-    if (isAdminAuthed(req)) return res.redirect("/admin/db-view");
-
+  // --- Routes ---
+  app.get("/admin/login", async (req, res) => {
+    if (await isAdminAuthed(req)) return res.redirect("/admin/db-view");
     const html = `<!doctype html>
 <html>
 <head><meta charset="utf-8"><title>Admin Login</title>
@@ -123,60 +149,42 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     res.send(html);
   });
 
-  // Helper to parse small urlencoded bodies (we avoid adding body-parser here)
-  async function readBody(req) {
-    return new Promise((resolve, reject) => {
-      let body = "";
-      req.on("data", (chunk) => { body += chunk.toString(); });
-      req.on("end", () => resolve(body));
-      req.on("error", reject);
-    });
-  }
-
-  // POST login (form or programmatic)
   app.post("/admin/login", async (req, res) => {
     try {
-      // If ADMIN_SECRET present and matches, accept immediately (no password)
+      const adminSettings = await loadAdminSettings();
+
+      // ADMIN_SECRET bypass
       if (ADMIN_SECRET) {
         const header = req.headers["x-admin-secret"];
         const q = req.query?.secret;
         if (header === ADMIN_SECRET || q === ADMIN_SECRET) {
-          // create session token
           const token = crypto.randomBytes(24).toString("hex");
-          db.adminSessions = db.adminSessions || {};
-          db.adminSessions[token] = { createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS };
-          // set cookie (HttpOnly). secure flag not set by default; set if req.secure
+          await createAdminSession(token, SESSION_TTL_MS);
           const secure = req.secure || req.headers["x-forwarded-proto"] === "https";
           res.setHeader("Set-Cookie", `admin_auth=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS/1000)}${secure ? "; Secure" : ""}`);
           return res.redirect("/admin/db-view");
         }
       }
 
-      // Read body (may be urlencoded form or JSON)
       const raw = await readBody(req);
       let password = null;
       if (raw.startsWith("password=") || raw.includes("&")) {
-        // urlencoded
         const params = new URLSearchParams(raw);
         password = params.get("password");
       } else {
-        // try json
         try { const j = JSON.parse(raw); password = j.password; } catch {}
       }
       if (!password) return res.status(400).send("Missing password");
 
-      // check stored hash from file
-      if (!adminData.passwordHash) {
-        return res.status(400).send("No admin password set. Use /admin/set-password to create one or set ADMIN_SECRET.");
+      if (!adminSettings.passwordHash) {
+        return res.status(400).send("No admin password set. Use /admin/set-password or configure ADMIN_SECRET.");
       }
-      
-      const ok = bcrypt.compareSync(String(password), adminData.passwordHash);
+
+      const ok = bcrypt.compareSync(String(password), adminSettings.passwordHash);
       if (!ok) return res.status(403).send("Invalid password");
 
-      // create session token
       const token = crypto.randomBytes(24).toString("hex");
-      db.adminSessions = db.adminSessions || {};
-      db.adminSessions[token] = { createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS };
+      await createAdminSession(token, SESSION_TTL_MS);
       const secure = req.secure || req.headers["x-forwarded-proto"] === "https";
       res.setHeader("Set-Cookie", `admin_auth=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS/1000)}${secure ? "; Secure" : ""}`);
       return res.redirect("/admin/db-view");
@@ -186,16 +194,11 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     }
   });
 
-  // GET set-password form
-  app.get("/admin/set-password", (req, res) => {
-    // Check if admin password exists
-    const adminExists = !!adminData.passwordHash;
-    
-    // If password exists, require authentication
-    if (adminExists && !isAdminAuthed(req)) {
-      return res.redirect("/admin/login");
-    }
-    
+  app.get("/admin/set-password", async (req, res) => {
+    const adminSettings = await loadAdminSettings();
+    const adminExists = !!adminSettings.passwordHash;
+    if (adminExists && !(await isAdminAuthed(req))) return res.redirect("/admin/login");
+
     const html = `<!doctype html>
 <html>
 <head><meta charset="utf-8"><title>Set Admin Password</title>
@@ -223,21 +226,15 @@ export default function registerAdminRoutes(app, db, opts = {}) {
   </form>
 </body>
 </html>`;
-    
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(html);
   });
 
-  // POST set-password - bootstrapping allowed if no password exists
   app.post("/admin/set-password", async (req, res) => {
     try {
-      // Authorization: allow if any of:
-      // - ADMIN_SECRET matches header/query
-      // - already authenticated session (isAdminAuthed)
-      // - OR no password exists yet (bootstrapping)
-      const adminExists = !!adminData.passwordHash;
-      if (!adminExists || isAdminAuthed(req)) {
-        // read body
+      const adminSettings = await loadAdminSettings();
+      const adminExists = !!adminSettings.passwordHash;
+      if (!adminExists || (await isAdminAuthed(req))) {
         const raw = await readBody(req);
         let newPassword = null;
         let currentPassword = null;
@@ -253,19 +250,15 @@ export default function registerAdminRoutes(app, db, opts = {}) {
           return res.status(400).json({ ok: false, error: "New password required (min length 6)" });
         }
 
-        // If admin exists, verify currentPassword
         if (adminExists) {
-          if (!currentPassword || !bcrypt.compareSync(String(currentPassword), adminData.passwordHash)) {
+          if (!currentPassword || !bcrypt.compareSync(String(currentPassword), adminSettings.passwordHash)) {
             return res.status(403).json({ ok: false, error: "Current password required or invalid" });
           }
         }
 
-        // set new hash
         const salt = bcrypt.genSaltSync(10);
         const hash = bcrypt.hashSync(String(newPassword), salt);
-        adminData.passwordHash = hash;
-        saveAdminData();
-
+        await saveAdminSettings({ passwordHash: hash });
         return res.json({ ok: true, message: adminExists ? "Password changed" : "Password set" });
       } else {
         return res.status(403).json({ ok: false, error: "Not authorized to set password" });
@@ -276,14 +269,10 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     }
   });
 
-  // GET logout - remove session token
-  app.get("/admin/logout", (req, res) => {
+  app.get("/admin/logout", async (req, res) => {
     try {
       const token = getCookie(req, "admin_auth");
-      if (token && db.adminSessions && db.adminSessions[token]) {
-        delete db.adminSessions[token];
-      }
-      // unset cookie
+      if (token) await deleteAdminSession(token);
       res.setHeader("Set-Cookie", `admin_auth=; HttpOnly; Path=/; Max-Age=0`);
       return res.redirect("/admin/login");
     } catch (err) {
@@ -292,10 +281,11 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     }
   });
 
-  // --- Protected viewer & download ---
-  app.get("/admin/db-view", (req, res) => {
-    if (!isAdminAuthed(req)) return res.redirect("/admin/login");
+  // Viewer & JSON download
+  app.get("/admin/db-view", async (req, res) => {
+    if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
 
+    // Build snapshot from provided db cache
     const snapshot = {
       scores: { ...(db.scores || {}) },
       periods: { ...(db.periods || {}) },
@@ -319,7 +309,7 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     const periodRows = Object.entries(snapshot.periods).map(([idx, p]) => ({
       periodIndex: idx,
       status: p.status || "",
-      txHash: p.txHash || "",  // Correct: using colon for object property
+      txHash: p.txHash || "",
       payouts: p.payouts ? JSON.stringify(p.payouts, null, 0) : "",
       error: p.error || "",
       updated_at: p.updated_at || ""
@@ -379,8 +369,9 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     res.send(html);
   });
 
-  app.get("/admin/db-download", (req, res) => {
-    if (!isAdminAuthed(req)) return res.redirect("/admin/login");
+  app.get("/admin/db-download", async (req, res) => {
+    if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
+    const adminSettings = await loadAdminSettings();
     const filename = `db-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -388,7 +379,7 @@ export default function registerAdminRoutes(app, db, opts = {}) {
       scores: db.scores || {},
       periods: db.periods || {},
       profileNames: db.profileNames || {},
-      admin: { hasPassword: !!adminData.passwordHash }
+      admin: { hasPassword: !!adminSettings.passwordHash }
     }, null, 2));
   });
 }

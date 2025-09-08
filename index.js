@@ -1,3 +1,4 @@
+// index.js
 import express from "express";
 import cron from "node-cron";
 import fs from "fs";
@@ -5,14 +6,17 @@ import path from "path";
 import cors from "cors";
 import dotenv from "dotenv";
 import { ethers } from "ethers";
+import { Pool } from "pg";
 import {
-  readDBSync,
-  writeDBAtomicAsync,
+  initDB,
+  saveScore,
+  saveProfileName,
+  savePeriod,
   computePeriod,
   processPeriod,
   normalizeProfileName
 } from "./leaderboard.js";
-import registerAdminRoutes from "./adminRoutes.js"; // Added import for admin routes
+import registerAdminRoutes from "./adminRoutes.js";
 
 dotenv.config();
 
@@ -24,13 +28,12 @@ const RPC_URL = process.env.RPC_URL;
 let PRIVATE_KEY = process.env.PRIVATE_KEY;
 const HOUSE_FEE_BPS = Number(process.env.HOUSE_FEE_BPS || 100);
 const TOP_N = Number(process.env.TOP_N || 3);
-const DB_FILE = path.resolve(process.env.DB_FILE || "./periods.json");
-const FLUSH_INTERVAL_MS = Number(process.env.FLUSH_INTERVAL_MS || 20000);
 const GAS_LIMIT = Number(process.env.GAS_LIMIT || 2_000_000);
-const ADMIN_SECRET = process.env.ADMIN_SECRET || null; // Added for admin routes
+const ADMIN_SECRET = process.env.ADMIN_SECRET || null;
 
+// Basic env validation for on-chain parts (if you're running without contract, set env accordingly)
 if (!CONTRACT_ADDRESS || !RPC_URL || !PRIVATE_KEY) {
-  console.error("Set CONTRACT_ADDRESS, RPC_URL, PRIVATE_KEY in .env");
+  console.error("Set CONTRACT_ADDRESS, RPC_URL, PRIVATE_KEY in .env (or disable on-chain features).");
   process.exit(1);
 }
 if (!PRIVATE_KEY.startsWith("0x")) PRIVATE_KEY = "0x" + PRIVATE_KEY;
@@ -45,40 +48,40 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, contractJson.abi, ownerWallet);
 
-// --- In-memory DB ---
-let db = readDBSync(DB_FILE);
-let flushing = false;
-
-async function flushAsync() {
-  if (flushing) return;
-  flushing = true;
-  try { await writeDBAtomicAsync(DB_FILE, db); }
-  catch (err) { console.error("Flush failed:", err); }
-  finally { flushing = false; }
+// --- Postgres pool ---
+if (!process.env.DATABASE_URL) {
+  console.error("Set DATABASE_URL in env (Postgres connection string)");
+  process.exit(1);
 }
-setInterval(flushAsync, FLUSH_INTERVAL_MS);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // Render (managed Postgres) usually requires SSL; allow override via PGSSLMODE=no
+  ssl: process.env.PGSSLMODE === "no" ? false : { rejectUnauthorized: false }
+});
 
-// --- Graceful shutdown ---
-function gracefulShutdown(signal) {
-  console.log(`\nReceived ${signal}. Flushing DB and exiting...`);
-  clearInterval(flushAsync);
-  flushAsync().finally(() => process.exit(0));
+// --- Load DB cache (async) ---
+let db;
+try {
+  db = await initDB(pool);
+  console.log("DB cache loaded (Postgres)");
+} catch (err) {
+  console.error("Failed to initialize DB:", err);
+  process.exit(1);
 }
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
 // --- Express ---
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Register admin routes - ADDED THIS LINE
-registerAdminRoutes(app, db, { adminSecret: ADMIN_SECRET });
+// Register admin routes, provide pool to adminRoutes
+registerAdminRoutes(app, db, { adminSecret: ADMIN_SECRET, pool });
 
-app.get("/", (req,res) => res.send("✅ Backend running!"));
+// Root
+app.get("/", (req,res) => res.send("✅ Backend running (Postgres)!"));
 
 // Submit score
-app.post("/api/submit-score", (req,res) => {
+app.post("/api/submit-score", async (req,res) => {
   try {
     const { user, score, profile_name, email } = req.body;
     if (!user || score === undefined || score === null) return res.status(400).json({ ok:false, error:"Missing user or score" });
@@ -96,6 +99,9 @@ app.post("/api/submit-score", (req,res) => {
     if (intScore > db.scores[addr].highest_score) db.scores[addr].highest_score = intScore;
     db.scores[addr].last_updated = new Date().toISOString();
 
+    // persist to Postgres
+    await saveScore(pool, db, db.scores[addr]);
+
     return res.json({ ok:true, saved: db.scores[addr] });
   } catch(err) {
     console.error("submit-score error:", err);
@@ -104,7 +110,7 @@ app.post("/api/submit-score", (req,res) => {
 });
 
 // Update profile name
-app.post("/api/update-profile", (req,res) => {
+app.post("/api/update-profile", async (req,res) => {
   try {
     const { user, profile_name } = req.body;
     if (!user || !profile_name) return res.status(400).json({ ok:false, error:"Missing user or profile_name" });
@@ -121,12 +127,19 @@ app.post("/api/update-profile", (req,res) => {
 
     // Remove old name index
     const prev = db.scores[addr]?.profile_name;
-    if (prev && db.profileNames[normalizeProfileName(prev)] === addr) delete db.profileNames[normalizeProfileName(prev)];
+    if (prev && db.profileNames[normalizeProfileName(prev)] === addr) {
+      const oldNormalized = normalizeProfileName(prev);
+      await pool.query(`DELETE FROM profile_names WHERE normalized_name = $1 AND owner_address = $2`, [oldNormalized, addr]);
+      delete db.profileNames[oldNormalized];
+    }
 
     db.scores[addr] = db.scores[addr] || { user_address: addr, email:null, profile_name:null, highest_score:0, games_played:0, last_updated:new Date().toISOString() };
     db.scores[addr].profile_name = raw;
     db.scores[addr].last_updated = new Date().toISOString();
-    db.profileNames[normalized] = addr;
+
+    // persist profile name and score
+    await saveProfileName(pool, db, normalized, addr);
+    await saveScore(pool, db, db.scores[addr]);
 
     return res.json({ ok:true, message:"profile_name set", saved: db.scores[addr] });
   } catch(err) {
@@ -135,13 +148,14 @@ app.post("/api/update-profile", (req,res) => {
   }
 });
 
-// Leaderboard
+// Leaderboard cache kept in-memory and refreshed periodically
 let leaderboardCache = [];
 function refreshLeaderboardCache() {
-  leaderboardCache = Object.values(db.scores)
-    .sort((a,b) => (b.highest_score||0)-(a.highest_score||0))
+  leaderboardCache = Object.values(db.scores || {})
+    .sort((a,b) => (Number(b.highest_score||0) - Number(a.highest_score||0)))
     .slice(0, 100);
 }
+refreshLeaderboardCache();
 setInterval(refreshLeaderboardCache, 5000);
 
 app.get("/api/leaderboard", (req,res) => {
@@ -149,28 +163,24 @@ app.get("/api/leaderboard", (req,res) => {
   return res.json({ ok:true, count: leaderboardCache.length, leaderboard: leaderboardCache.slice(0,limit) });
 });
 
-// Get profile info by wallet address
+// Get profile info
 app.get("/api/profile/:address", (req, res) => {
   try {
     const addr = String(req.params.address).trim().toLowerCase();
     const record = db.scores[addr] || null;
-
     if (!record || !record.profile_name) {
       return res.status(404).json({ ok: false, error: "No profile found" });
     }
-
-    return res.json({ 
-      ok: true, 
-      user_address: addr, 
-      profile_name: record.profile_name 
+    return res.json({
+      ok: true,
+      user_address: addr,
+      profile_name: record.profile_name
     });
   } catch (err) {
     console.error("/api/profile error:", err);
     return res.status(500).json({ ok: false, error: String(err) });
   }
 });
-
-
 
 // Period info
 app.get("/api/period", (req,res) => {
@@ -186,19 +196,19 @@ app.post("/api/process-now", async (req,res) => {
   try {
     const ts = Date.now()-1000;
     const { periodIndex } = computePeriod(ts, DURATION_MS);
-    await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit:GAS_LIMIT });
+    await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit:GAS_LIMIT, pool });
     return res.json({ ok:true, record: db.periods[periodIndex]||null });
   } catch(err) { return res.status(500).json({ ok:false, error:String(err) }); }
 });
 
-// --- Cron ---
+// Cron
 cron.schedule(CRON_SCHEDULE, async () => {
   try {
     const { periodIndex } = computePeriod(Date.now()-1000, DURATION_MS);
     console.log("Cron processing period", periodIndex, new Date().toISOString());
-    await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit:GAS_LIMIT });
+    await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit:GAS_LIMIT, pool });
   } catch(err){ console.error("Cron error:", err); }
 }, { timezone:"UTC" });
 
-// --- Start server ---
+// Start
 app.listen(PORT, ()=>console.log(`Server listening on ${PORT}`));
