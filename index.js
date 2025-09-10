@@ -1,4 +1,5 @@
-// index.js
+// index.js - backend (full file)
+// Node/ES module expected (top-level await used)
 import express from "express";
 import cron from "node-cron";
 import fs from "fs";
@@ -14,7 +15,8 @@ import {
   savePeriod,
   computePeriod,
   processPeriod,
-  normalizeProfileName
+  normalizeProfileName,
+  getLeaderboard
 } from "./leaderboard.js";
 import registerAdminRoutes from "./adminRoutes.js";
 
@@ -80,26 +82,39 @@ registerAdminRoutes(app, db, { adminSecret: ADMIN_SECRET, pool });
 // Root
 app.get("/", (req,res) => res.send("✅ Backend running (Postgres)!"));
 
-// Submit score
+// Submit score (now accepts optional 'level' + profile_name + email)
 app.post("/api/submit-score", async (req,res) => {
   try {
-    const { user, score, profile_name, email } = req.body;
+    const { user, score, profile_name, email, level } = req.body;
     if (!user || score === undefined || score === null) return res.status(400).json({ ok:false, error:"Missing user or score" });
 
     const addr = String(user).trim().toLowerCase();
-    const intScore = Math.floor(Number(score)||0);
+    const intScore = Math.floor(Number(score) || 0);
+    const intLevel = Number.isFinite(Number(level)) ? Math.max(1, Math.floor(Number(level))) : (db.scores?.[addr]?.level || 1);
 
-    db.scores[addr] = db.scores[addr] || { user_address: addr, email:null, profile_name:null, highest_score:0, games_played:0, last_score:null, last_updated:new Date().toISOString() };
+    if (!db.scores) db.scores = {};
 
-    if (profile_name) db.scores[addr].profile_name = profile_name.trim();
+    db.scores[addr] = db.scores[addr] || {
+      user_address: addr,
+      email: null,
+      profile_name: null,
+      highest_score: 0,
+      games_played: 0,
+      last_score: null,
+      level: intLevel,
+      last_updated: new Date().toISOString()
+    };
+
+    if (profile_name) db.scores[addr].profile_name = String(profile_name).trim();
     if (email) db.scores[addr].email = String(email).trim();
 
     db.scores[addr].last_score = intScore;
-    db.scores[addr].games_played += 1;
-    if (intScore > db.scores[addr].highest_score) db.scores[addr].highest_score = intScore;
+    db.scores[addr].games_played = Number(db.scores[addr].games_played || 0) + 1;
+    db.scores[addr].level = intLevel;
+    if (intScore > Number(db.scores[addr].highest_score || 0)) db.scores[addr].highest_score = intScore;
     db.scores[addr].last_updated = new Date().toISOString();
 
-    // persist to Postgres
+    // persist to Postgres (saveScore will update db cache too)
     await saveScore(pool, db, db.scores[addr]);
 
     return res.json({ ok:true, saved: db.scores[addr] });
@@ -125,7 +140,7 @@ app.post("/api/update-profile", async (req,res) => {
     const existingOwner = db.profileNames[normalized];
     if (existingOwner && existingOwner !== addr) return res.status(409).json({ ok:false, error:"profile_name already exists" });
 
-    // Remove old name index
+    // Remove old name index (if owned by this addr)
     const prev = db.scores[addr]?.profile_name;
     if (prev && db.profileNames[normalizeProfileName(prev)] === addr) {
       const oldNormalized = normalizeProfileName(prev);
@@ -133,15 +148,15 @@ app.post("/api/update-profile", async (req,res) => {
       delete db.profileNames[oldNormalized];
     }
 
-    db.scores[addr] = db.scores[addr] || { user_address: addr, email:null, profile_name:null, highest_score:0, games_played:0, last_updated:new Date().toISOString() };
+    db.scores[addr] = db.scores[addr] || {
+      user_address: addr, email:null, profile_name:null, highest_score:0, games_played:0, level:1, last_updated:new Date().toISOString()
+    };
     db.scores[addr].profile_name = raw;
     db.scores[addr].last_updated = new Date().toISOString();
 
-    // persist profile name and score
     // persist score first (ensure FK target exists), then profile name
     await saveScore(pool, db, db.scores[addr]);
     await saveProfileName(pool, db, normalized, addr);
-
 
     return res.json({ ok:true, message:"profile_name set", saved: db.scores[addr] });
   } catch(err) {
@@ -150,19 +165,37 @@ app.post("/api/update-profile", async (req,res) => {
   }
 });
 
-// Leaderboard cache kept in-memory and refreshed periodically
+// Leaderboard cache kept in-memory and refreshed periodically (uses getLeaderboard)
 let leaderboardCache = [];
 function refreshLeaderboardCache() {
-  leaderboardCache = Object.values(db.scores || {})
-    .sort((a,b) => (Number(b.highest_score||0) - Number(a.highest_score||0)))
-    .slice(0, 100);
+  try {
+    const result = getLeaderboard(db, 100, null); // top 100 cached
+    leaderboardCache = result.leaderboard || [];
+  } catch (err) {
+    console.error("refreshLeaderboardCache error:", err);
+    leaderboardCache = Object.values(db.scores || {})
+      .sort((a,b) => (Number(b.highest_score||0) - Number(a.highest_score||0)))
+      .slice(0, 100);
+  }
 }
 refreshLeaderboardCache();
 setInterval(refreshLeaderboardCache, 5000);
 
+// New /api/leaderboard route: top N + optional user record + rank
 app.get("/api/leaderboard", (req,res) => {
-  const limit = Math.min(100, Number(req.query.limit||10));
-  return res.json({ ok:true, count: leaderboardCache.length, leaderboard: leaderboardCache.slice(0,limit) });
+  try {
+    const limit = Math.min(100, Number(req.query.limit || 10));
+    const user = req.query.user ? String(req.query.user).trim().toLowerCase() : null;
+
+    // Prefer in-memory computed leaderboard for speed, but compute rank for player via helper
+    // Use getLeaderboard for consistent result (it computes rank)
+    const { leaderboard, player } = getLeaderboard(db, limit, user);
+
+    return res.json({ ok: true, count: leaderboard.length, leaderboard, player });
+  } catch (err) {
+    console.error("/api/leaderboard error:", err);
+    return res.status(500).json({ ok:false, error:String(err) });
+  }
 });
 
 // Get profile info
@@ -176,7 +209,8 @@ app.get("/api/profile/:address", (req, res) => {
     return res.json({
       ok: true,
       user_address: addr,
-      profile_name: record.profile_name
+      profile_name: record.profile_name,
+      level: record.level ?? 1
     });
   } catch (err) {
     console.error("/api/profile error:", err);
@@ -193,7 +227,7 @@ app.get("/api/period", (req,res) => {
   } catch(err) { return res.status(500).json({ ok:false, error:String(err) }); }
 });
 
-// Process now
+// Process now (force)
 app.post("/api/process-now", async (req,res) => {
   try {
     const ts = Date.now()-1000;

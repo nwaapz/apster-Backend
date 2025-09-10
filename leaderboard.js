@@ -2,10 +2,23 @@
 import { ethers } from "ethers";
 
 /**
- * DB helper functions + on-chain logic
+ * DB helper functions + on-chain logic for leaderboard
+ *
+ * Exports:
+ *  - initDB(pool)
+ *  - saveScore(pool, db, scoreObj)
+ *  - saveProfileName(pool, db, normalized, owner_address)
+ *  - savePeriod(pool, db, periodIndex, periodObj)
+ *  - normalizeProfileName(name)
+ *  - computePeriod(ts, DURATION_MS)
+ *  - computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS)
+ *  - processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, opts)
+ *  - getLeaderboard(db, limit = 10, user = null)
  */
 
+// ----------------------- DB init & helpers -----------------------
 export async function initDB(pool) {
+  // Create tables (safe). Include level column in DDL.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS scores (
       user_address TEXT PRIMARY KEY,
@@ -14,6 +27,7 @@ export async function initDB(pool) {
       highest_score BIGINT DEFAULT 0,
       last_score BIGINT DEFAULT 0,
       games_played INTEGER DEFAULT 0,
+      level INTEGER DEFAULT 1,
       last_updated TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS profile_names (
@@ -39,26 +53,36 @@ export async function initDB(pool) {
     );
   `);
 
+  // Safe migration: ensure 'level' column exists (if older schema)
+  await pool.query(`ALTER TABLE scores ADD COLUMN IF NOT EXISTS level INTEGER DEFAULT 1;`);
+
   const db = { scores: {}, profileNames: {}, periods: {} };
 
+  // Load scores into in-memory cache
   const scoresRes = await pool.query(`SELECT * FROM scores`);
   for (const r of scoresRes.rows) {
-    db.scores[r.user_address.toLowerCase()] = {
-      user_address: r.user_address.toLowerCase(),
+    const addr = (r.user_address || "").toLowerCase();
+    if (!addr) continue;
+    db.scores[addr] = {
+      user_address: addr,
       profile_name: r.profile_name || null,
       email: r.email || null,
       highest_score: Number(r.highest_score ?? 0),
       last_score: r.last_score === null ? null : Number(r.last_score),
       games_played: Number(r.games_played ?? 0),
+      level: Number(r.level ?? 1),
       last_updated: r.last_updated ? new Date(r.last_updated).toISOString() : new Date().toISOString()
     };
   }
 
+  // Load profile names
   const profileRes = await pool.query(`SELECT * FROM profile_names`);
   for (const r of profileRes.rows) {
+    if (!r.normalized_name) continue;
     db.profileNames[r.normalized_name] = (r.owner_address || "").toLowerCase();
   }
 
+  // Load periods
   const periodsRes = await pool.query(`SELECT * FROM periods`);
   for (const r of periodsRes.rows) {
     db.periods[String(r.period_index)] = {
@@ -82,22 +106,33 @@ export async function saveScore(pool, db, scoreObj) {
     highest_score = 0,
     last_score = null,
     games_played = 0,
+    level = 1,
     last_updated = new Date().toISOString()
   } = scoreObj;
 
   const userAddress = String(user_address).toLowerCase();
 
   await pool.query(
-    `INSERT INTO scores(user_address, profile_name, email, highest_score, last_score, games_played, last_updated)
-     VALUES($1,$2,$3,$4,$5,$6,$7)
+    `INSERT INTO scores(user_address, profile_name, email, highest_score, last_score, games_played, level, last_updated)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT(user_address) DO UPDATE
      SET profile_name = EXCLUDED.profile_name,
          email = EXCLUDED.email,
          highest_score = EXCLUDED.highest_score,
          last_score = EXCLUDED.last_score,
          games_played = EXCLUDED.games_played,
+         level = EXCLUDED.level,
          last_updated = EXCLUDED.last_updated`,
-    [userAddress, profile_name, email, String(highest_score), last_score === null ? null : String(last_score), games_played, last_updated]
+    [
+      userAddress,
+      profile_name,
+      email,
+      String(highest_score),
+      last_score === null ? null : String(last_score),
+      games_played,
+      Number(level),
+      last_updated
+    ]
   );
 
   db.scores[userAddress] = {
@@ -107,6 +142,7 @@ export async function saveScore(pool, db, scoreObj) {
     highest_score: Number(highest_score || 0),
     last_score: last_score === null ? null : Number(last_score),
     games_played: Number(games_played || 0),
+    level: Number(level || 1),
     last_updated
   };
 }
@@ -144,6 +180,7 @@ export async function savePeriod(pool, db, periodIndex, periodObj) {
   };
 }
 
+// ----------------------- Misc helpers -----------------------
 export function normalizeProfileName(name) {
   return String(name || "").trim().toLowerCase();
 }
@@ -157,16 +194,66 @@ export function computePeriod(ts, DURATION_MS) {
   };
 }
 
+// ----------------------- Leaderboard helper -----------------------
+/**
+ * getLeaderboard(db, limit = 10, user = null)
+ * - db: the in-memory db cache from initDB
+ * - limit: number of top players to return
+ * - user: optional user address (string) to include player's own record + rank
+ *
+ * Returns: { leaderboard: [...], player: { user_address, profile_name, score, level, rank|null } | null }
+ */
+export function getLeaderboard(db, limit = 10, user = null) {
+  if (!db || !db.scores) return { leaderboard: [], player: null };
+
+  const allPlayers = Object.values(db.scores || {}).slice();
+
+  // sort descending by highest_score
+  allPlayers.sort((a, b) => Number(b.highest_score || 0) - Number(a.highest_score || 0));
+
+  const leaderboard = allPlayers.slice(0, limit).map((p, idx) => ({
+    user_address: p.user_address,
+    profile_name: p.profile_name || null,
+    score: Number(p.highest_score || 0),
+    level: Number(p.level ?? 1),
+    rank: idx + 1
+  }));
+
+  let playerRecord = null;
+  if (user) {
+    const normalized = String(user).trim().toLowerCase();
+    const p = db.scores[normalized];
+    if (p) {
+      // compute full rank across all players
+      const rank = allPlayers.findIndex(x => x.user_address === normalized);
+      playerRecord = {
+        user_address: p.user_address,
+        profile_name: p.profile_name || null,
+        score: Number(p.highest_score || 0),
+        level: Number(p.level ?? 1),
+        rank: rank >= 0 ? rank + 1 : null
+      };
+    } else {
+      playerRecord = null;
+    }
+  }
+
+  return { leaderboard, player: playerRecord };
+}
+
+// ----------------------- On-chain computation -----------------------
 export async function computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS) {
   const players = await contract.getCurrentPlayers();
   if (!players || players.length === 0) return { winners: [], amounts: [], poolBalanceBN: "0" };
 
   const deposits = await Promise.all(players.map(async p => {
     const d = await contract.getPlayerDeposit(p);
+    // d may be BigNumber-like (ethers), convert to BigInt safely
     return { addr: p, deposit: BigInt(d?.toString() ?? "0") };
   }));
 
-  deposits.sort((a,b) => (b.deposit - a.deposit > 0n ? 1 : b.deposit - a.deposit < 0n ? -1 : 0));
+  // sort descending by deposit
+  deposits.sort((a, b) => (b.deposit > a.deposit ? 1 : b.deposit < a.deposit ? -1 : 0));
 
   const poolBalanceBN = BigInt((await contract.poolBalance()).toString());
   if (poolBalanceBN === 0n) return { winners: [], amounts: [], poolBalanceBN: "0" };
@@ -203,6 +290,7 @@ export async function computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS) 
   return { winners, amounts, house1: house1.toString(), house2: house2.toString(), poolBalanceBN: poolBalanceBN.toString() };
 }
 
+// ----------------------- Period processing (on-chain payouts) -----------------------
 export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, opts = {}) {
   const pool = opts.pool;
   if (!db.periods) db.periods = {};
@@ -243,7 +331,7 @@ export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_
     const periodObj = {
       status: "paid",
       txHash: tx.hash || null,
-      payouts: winners.map((w,i) => ({ to: w, amount: amounts[i].toString() })),
+      payouts: winners.map((w, i) => ({ to: w, amount: amounts[i].toString() })),
       updated_at: new Date().toISOString()
     };
     db.periods[periodIndex] = periodObj;
@@ -255,3 +343,16 @@ export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_
     if (pool) await savePeriod(pool, db, periodIndex, periodObj);
   }
 }
+
+// ----------------------- Exports -----------------------
+export default {
+  initDB,
+  saveScore,
+  saveProfileName,
+  savePeriod,
+  normalizeProfileName,
+  computePeriod,
+  computeWinnersFromOnchain,
+  processPeriod,
+  getLeaderboard
+};
