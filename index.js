@@ -218,46 +218,24 @@ app.get("/api/profile/:address", (req, res) => {
   }
 });
 
-// Period info (enhanced: includes remaining time & progress)
-app.get("/api/period", (req, res) => {
+// Period info
+app.get("/api/period", (req,res) => {
   try {
-    const now = Date.now();
-    const { periodIndex, periodStart, periodEnd } = computePeriod(now, DURATION_MS);
+    const { periodIndex, periodStart, periodEnd } = computePeriod(Date.now(), DURATION_MS);
     const record = db.periods[periodIndex] || null;
-
-    const remainingMs = Math.max(0, periodEnd - now);
-    const remainingSec = Math.ceil(remainingMs / 1000);
-    const elapsedMs = Math.max(0, now - periodStart);
-    const progress = DURATION_MS > 0 ? Math.min(100, Math.round((elapsedMs / DURATION_MS) * 10000) / 100) : 100;
-
-    // human-friendly simple "MM:SS"
-    const fmt = (ms) => {
-      const s = Math.floor(ms / 1000);
-      const m = Math.floor(s / 60);
-      const sec = s % 60;
-      return `${m}:${sec.toString().padStart(2, "0")}`;
-    };
-
-    return res.json({
-      ok: true,
-      periodIndex,
-      periodStart,          // ms epoch
-      periodEnd,            // ms epoch
-      durationMs: DURATION_MS,
-      remainingMs,
-      remainingSec,
-      remainingHuman: fmt(remainingMs),
-      progressPercent: progress, // 0..100
-      status: record?.status || "open",
-      lastPayoutTx: record?.txHash || null,
-      payouts: record?.payouts || null
-    });
-  } catch (err) {
-    console.error("/api/period error:", err);
-    return res.status(500).json({ ok:false, error:String(err) });
-  }
+    return res.json({ periodIndex, periodStart, periodEnd, durationMs:DURATION_MS, status:record?.status||"open", lastPayoutTx:record?.txHash||null, payouts:record?.payouts||null });
+  } catch(err) { return res.status(500).json({ ok:false, error:String(err) }); }
 });
 
+// Process now (force)
+app.post("/api/process-now", async (req,res) => {
+  try {
+    const ts = Date.now()-1000;
+    const { periodIndex } = computePeriod(ts, DURATION_MS);
+    await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit:GAS_LIMIT, pool });
+    return res.json({ ok:true, record: db.periods[periodIndex]||null });
+  } catch(err) { return res.status(500).json({ ok:false, error:String(err) }); }
+});
 
 // Cron
 cron.schedule(CRON_SCHEDULE, async () => {
