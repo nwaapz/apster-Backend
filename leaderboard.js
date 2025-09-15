@@ -185,14 +185,18 @@ export function normalizeProfileName(name) {
   return String(name || "").trim().toLowerCase();
 }
 
+// leaderboard.js
 export function computePeriod(ts, DURATION_MS) {
-  const periodIndex = Math.floor(ts / DURATION_MS);
+  // Anchor to a known Friday 00:00 UTC
+  const FRIDAY_0_UTC = Date.UTC(2025, 0, 3, 0, 0, 0); // Jan 3, 2025 is Friday
+  const periodIndex = Math.floor((ts - FRIDAY_0_UTC) / DURATION_MS);
   return {
     periodIndex,
-    periodStart: periodIndex * DURATION_MS,
-    periodEnd: (periodIndex + 1) * DURATION_MS
+    periodStart: FRIDAY_0_UTC + periodIndex * DURATION_MS,
+    periodEnd: FRIDAY_0_UTC + (periodIndex + 1) * DURATION_MS
   };
 }
+
 
 // ----------------------- Leaderboard helper -----------------------
 /**
