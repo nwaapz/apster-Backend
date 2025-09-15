@@ -77,7 +77,16 @@ app.use(cors());
 app.use(express.json());
 
 // Register admin routes, provide pool to adminRoutes
-registerAdminRoutes(app, db, { adminSecret: ADMIN_SECRET, pool });
+import WagerPoolSingleEntryABI from "./abi/WagerPoolSingleEntry.json" assert { type: "json" };
+
+registerAdminRoutes(app, db, {
+  pool,
+  adminSecret: ADMIN_SECRET,
+  contractAddress: CONTRACT_ADDRESS,
+  contractAbi: WagerPoolSingleEntryABI,
+  rpcUrl: RPC_URL
+});
+
 
 // Root
 app.get("/", (req,res) => res.send("✅ Backend running (Postgres)!"));
