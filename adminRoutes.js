@@ -6,6 +6,7 @@ export default function registerAdminRoutes(app, db, opts = {}) {
   const ADMIN_SECRET = opts.adminSecret ?? null;
   const pool = opts.pool;
   const SESSION_TTL_MS = opts.sessionTtlMs ?? 60 * 60 * 1000; // 1 hour
+  const getPoolInfo = opts.getPoolInfo; // async function returning { totalPool, depositsByPlayer }
 
   if (!pool) throw new Error("registerAdminRoutes requires opts.pool (pg Pool)");
 
@@ -18,7 +19,6 @@ export default function registerAdminRoutes(app, db, opts = {}) {
   }
 
   async function saveAdminSettings(adminData) {
-    // adminData = { passwordHash: '...' }
     const v = { hash: adminData.passwordHash || null };
     await pool.query(`
       INSERT INTO admin_settings(k, v) VALUES('passwordHash', $1)
@@ -38,7 +38,6 @@ export default function registerAdminRoutes(app, db, opts = {}) {
 
   async function getAdminSession(token) {
     if (!token) return null;
-    // Remove expired sessions first (optional)
     await pool.query(`DELETE FROM admin_sessions WHERE expires_at < NOW()`);
     const r = await pool.query(`SELECT token, created_at, expires_at FROM admin_sessions WHERE token = $1 LIMIT 1`, [token]);
     if (r.rowCount === 0) return null;
@@ -64,19 +63,15 @@ export default function registerAdminRoutes(app, db, opts = {}) {
   }
 
   async function isAdminAuthed(req) {
-    // ADMIN_SECRET bypass - header or query param
     if (ADMIN_SECRET) {
       const header = req.headers["x-admin-secret"];
       const q = req.query?.secret;
       if (header === ADMIN_SECRET || q === ADMIN_SECRET) return true;
     }
-
-    // session cookie
     const token = getCookie(req, "admin_auth");
     if (!token) return false;
     const s = await getAdminSession(token);
     if (!s) return false;
-    // check expiry
     if (new Date(s.expiresAt).getTime() < Date.now()) {
       await deleteAdminSession(token);
       return false;
@@ -110,11 +105,10 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     return html;
   }
 
-  // Read small body helper (no body-parser)
   async function readBody(req) {
     return new Promise((resolve, reject) => {
       let body = "";
-      req.on("data", (chunk) => { body += chunk.toString(); });
+      req.on("data", chunk => body += chunk.toString());
       req.on("end", () => resolve(body));
       req.on("error", reject);
     });
@@ -153,7 +147,6 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     try {
       const adminSettings = await loadAdminSettings();
 
-      // ADMIN_SECRET bypass
       if (ADMIN_SECRET) {
         const header = req.headers["x-admin-secret"];
         const q = req.query?.secret;
@@ -176,9 +169,7 @@ export default function registerAdminRoutes(app, db, opts = {}) {
       }
       if (!password) return res.status(400).send("Missing password");
 
-      if (!adminSettings.passwordHash) {
-        return res.status(400).send("No admin password set. Use /admin/set-password or configure ADMIN_SECRET.");
-      }
+      if (!adminSettings.passwordHash) return res.status(400).send("No admin password set.");
 
       const ok = bcrypt.compareSync(String(password), adminSettings.passwordHash);
       if (!ok) return res.status(403).send("Invalid password");
@@ -213,8 +204,7 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     <div class="mb-3">
       <label class="form-label">Current Password</label>
       <input name="currentPassword" class="form-control" type="password" required />
-    </div>
-    ` : ''}
+    </div>` : ''}
     <div class="mb-3">
       <label class="form-label">New Password</label>
       <input name="newPassword" class="form-control" type="password" required minlength="6" />
@@ -246,23 +236,19 @@ export default function registerAdminRoutes(app, db, opts = {}) {
           try { const j = JSON.parse(raw); newPassword = j.password || j.newPassword; currentPassword = j.currentPassword; } catch {}
         }
 
-        if (!newPassword || String(newPassword).length < 6) {
+        if (!newPassword || String(newPassword).length < 6)
           return res.status(400).json({ ok: false, error: "New password required (min length 6)" });
-        }
 
         if (adminExists) {
-          if (!currentPassword || !bcrypt.compareSync(String(currentPassword), adminSettings.passwordHash)) {
+          if (!currentPassword || !bcrypt.compareSync(String(currentPassword), adminSettings.passwordHash))
             return res.status(403).json({ ok: false, error: "Current password required or invalid" });
-          }
         }
 
         const salt = bcrypt.genSaltSync(10);
         const hash = bcrypt.hashSync(String(newPassword), salt);
         await saveAdminSettings({ passwordHash: hash });
         return res.json({ ok: true, message: adminExists ? "Password changed" : "Password set" });
-      } else {
-        return res.status(403).json({ ok: false, error: "Not authorized to set password" });
-      }
+      } else return res.status(403).json({ ok: false, error: "Not authorized to set password" });
     } catch (err) {
       console.error("/admin/set-password error:", err);
       return res.status(500).json({ ok: false, error: "Server error" });
@@ -281,11 +267,10 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     }
   });
 
-  // Viewer & JSON download
+  // --- DB Viewer with Pool section ---
   app.get("/admin/db-view", async (req, res) => {
     if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
 
-    // Build snapshot from provided db cache
     const snapshot = {
       scores: { ...(db.scores || {}) },
       periods: { ...(db.periods || {}) },
@@ -325,6 +310,26 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     }));
     const profileTable = buildTable(["normalized_name", "owner_address"], profileRows);
 
+    // --- Pool / Deposits section ---
+    let poolHtml = "";
+    if (getPoolInfo) {
+      try {
+        const poolData = await getPoolInfo(); // { totalPool, depositsByPlayer }
+        const poolRows = Object.entries(poolData.depositsByPlayer || {}).map(([player, amt]) => ({
+          player,
+          deposited: amt
+        }));
+        const poolTable = buildTable(["player", "deposited"], poolRows);
+        poolHtml = `<div class="mb-4">
+          <h5>Wager Pool (Total: ${poolData.totalPool ?? 0})</h5>
+          ${poolTable}
+        </div>`;
+      } catch (err) {
+        console.error("Error loading pool info:", err);
+        poolHtml = `<p class="text-danger">Error loading pool info</p>`;
+      }
+    }
+
     const html = `<!doctype html>
 <html>
 <head>
@@ -359,6 +364,8 @@ export default function registerAdminRoutes(app, db, opts = {}) {
       <h5>Profile Names (${htmlEscape(String(profileRows.length))})</h5>
       ${profileTable}
     </div>
+
+    ${poolHtml}
 
     <footer class="text-muted small">This page is protected. Keep credentials secret.</footer>
   </div>
