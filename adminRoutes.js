@@ -134,7 +134,7 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     const playerPayments = {};
     for (const addr of currentPlayers) {
       try {
-        const paid = await contract.playerPaid(addr); // adjust to your contract method
+        const paid = await contract.hasPaid(addr); // adjust to your contract method
         playerPayments[addr] = ethers.utils.formatEther(paid);
       } catch (err) {
         console.error("Error fetching payment for", addr, err);
@@ -329,14 +329,14 @@ app.get("/admin/db-view", async (req, res) => {
   let contractInfo = { balance: "N/A", playerDeposits: {}, hasPaidStatus: {} };
   if (opts.contract) {
     try {
-      const contract = opts.contract;
+      const contract = opts.contract; // Make sure this is the same instance as in index.js
 
-      // Contract balance (internal poolBalance)
+      // Contract balance (ETH)
       try {
-        const balance = await contract.poolBalance();
+        const balance = await contract.provider.getBalance(contract.address);
         contractInfo.balance = ethers.utils.formatEther(balance);
       } catch (err) {
-        console.error("Error fetching poolBalance:", err);
+        console.error("Error fetching balance:", err);
         contractInfo.balance = "Error";
       }
 
@@ -351,8 +351,7 @@ app.get("/admin/db-view", async (req, res) => {
       // Player deposits & hasPaid status
       const playerDeposits = {};
       const hasPaidStatus = {};
-      await Promise.all(currentPlayers.map(async (addr) => {
-        // Deposit
+      for (const addr of currentPlayers) {
         try {
           const deposit = await contract.getPlayerDeposit(addr);
           playerDeposits[addr] = ethers.utils.formatEther(deposit);
@@ -361,7 +360,6 @@ app.get("/admin/db-view", async (req, res) => {
           playerDeposits[addr] = "Error";
         }
 
-        // HasPaid
         try {
           const paid = await contract.hasPaid(addr);
           hasPaidStatus[addr] = paid ? "Yes" : "No";
@@ -369,7 +367,7 @@ app.get("/admin/db-view", async (req, res) => {
           console.error(`Error fetching hasPaid for ${addr}:`, err);
           hasPaidStatus[addr] = "Error";
         }
-      }));
+      }
 
       contractInfo.playerDeposits = playerDeposits;
       contractInfo.hasPaidStatus = hasPaidStatus;
@@ -480,6 +478,7 @@ app.get("/admin/db-view", async (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
+
 
 
 
