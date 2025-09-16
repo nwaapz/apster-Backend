@@ -339,7 +339,11 @@ app.get("/admin/db-view", async (req, res) => {
         } else if (typeof contract.poolBalance === "function") {
           balance = await contract.poolBalance();
         }
-        contractInfo.balance = balance ? ethers.utils.formatEther(balance) : "0";
+
+        // Convert balance to ETH string safely
+        if (balance?._isBigNumber) contractInfo.balance = ethers.utils.formatEther(balance);
+        else if (typeof balance === "number") contractInfo.balance = (balance / 1e18).toString();
+        else contractInfo.balance = String(balance ?? "0");
       } catch (err) {
         console.error("Error fetching balance:", err);
         contractInfo.balance = "Error";
@@ -348,9 +352,8 @@ app.get("/admin/db-view", async (req, res) => {
       // Current players
       let currentPlayers = [];
       try {
-        currentPlayers = Array.isArray(await contract.getCurrentPlayers())
-          ? await contract.getCurrentPlayers()
-          : [];
+        const players = await contract.getCurrentPlayers();
+        currentPlayers = Array.isArray(players) ? players : [];
       } catch (err) {
         console.error("getCurrentPlayers() failed:", err);
       }
@@ -362,9 +365,11 @@ app.get("/admin/db-view", async (req, res) => {
         // Deposit
         try {
           let deposit = await contract.getPlayerDeposit(addr);
-          // handle BigNumber or number
-          if (deposit && deposit._isBigNumber) deposit = ethers.utils.formatEther(deposit);
-          else deposit = String(deposit ?? 0);
+
+          if (deposit?._isBigNumber) deposit = ethers.utils.formatEther(deposit);
+          else if (typeof deposit === "number") deposit = (deposit / 1e18).toString();
+          else deposit = String(deposit ?? "0");
+
           playerDeposits[addr] = deposit;
         } catch (err) {
           console.error(`Error fetching deposit for ${addr}:`, err);
@@ -400,7 +405,7 @@ app.get("/admin/db-view", async (req, res) => {
     deposit: contractInfo.playerDeposits[addr],
     hasPaid: contractInfo.hasPaidStatus[addr]
   }));
-  const paymentsTable = buildTable(["player", "deposit", "hasPaid"], paymentsRows);
+  const paymentsTable = buildTable(["player", "deposit (ETH)", "hasPaid"], paymentsRows);
 
   const scoreRows = Object.values(snapshot.scores).map(s => ({
     user_address: s.user_address || "",
@@ -489,6 +494,7 @@ app.get("/admin/db-view", async (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
+
 
 
 
