@@ -204,13 +204,26 @@ export function computePeriod(ts, DURATION_MS) {
 }
 
 // ----------------------- Leaderboard helper -----------------------
+// ----------------------- Leaderboard helper -----------------------
 export function getLeaderboard(db, limit = 10, user = null) {
   if (!db || !db.scores) return { leaderboard: [], player: null };
 
-  const allPlayers = Object.values(db.scores || {}).slice();
-  allPlayers.sort((a, b) => Number(b.highest_score || 0) - Number(a.highest_score || 0));
+  // Build an array of all players and normalize score values
+  const allPlayersRaw = Object.values(db.scores || {}).slice();
 
-  const leaderboard = allPlayers.slice(0, limit).map((p, idx) => ({
+  // Filter out players with non-positive scores (<= 0)
+  const scoredPlayers = allPlayersRaw
+    .map(p => ({
+      ...p,
+      highest_score: Number(p.highest_score || 0)
+    }))
+    .filter(p => Number(p.highest_score) > 0);
+
+  // Sort descending by highest_score
+  scoredPlayers.sort((a, b) => Number(b.highest_score) - Number(a.highest_score));
+
+  // Build leaderboard limited to requested size
+  const leaderboard = scoredPlayers.slice(0, limit).map((p, idx) => ({
     user_address: p.user_address,
     profile_name: p.profile_name || null,
     score: Number(p.highest_score || 0),
@@ -218,24 +231,37 @@ export function getLeaderboard(db, limit = 10, user = null) {
     rank: idx + 1
   }));
 
+  // Build player record (if requested). Player may be excluded from leaderboard if score <= 0,
+  // but we still return their score and null rank in that case.
   let playerRecord = null;
   if (user) {
     const normalized = String(user).trim().toLowerCase();
     const p = db.scores[normalized];
     if (p) {
-      const rank = allPlayers.findIndex(x => x.user_address === normalized);
+      const score = Number(p.highest_score || 0);
+
+      // If player's score > 0 compute rank among scoredPlayers, otherwise rank is null
+      let rank = null;
+      if (score > 0) {
+        const idx = scoredPlayers.findIndex(x => x.user_address === normalized);
+        rank = idx >= 0 ? idx + 1 : null;
+      }
+
       playerRecord = {
         user_address: p.user_address,
         profile_name: p.profile_name || null,
-        score: Number(p.highest_score || 0),
+        score,
         level: Number(p.level ?? 1),
-        rank: rank >= 0 ? rank + 1 : null
+        rank
       };
+    } else {
+      playerRecord = null;
     }
   }
 
   return { leaderboard, player: playerRecord };
 }
+
 
 // ----------------------- Off-chain computation -----------------------
 
