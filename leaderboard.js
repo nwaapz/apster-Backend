@@ -279,31 +279,30 @@ export async function computeWinnersFromOffchain(contract, db) {
 
   if (poolBalanceBN === 0n) return { winners: [], amounts: [], house: "0", poolBalanceBN: "0" };
 
-  // Get top players
+  // Get top players (max 10)
   const allScores = Object.values(db.scores || {});
   if (!allScores.length) return { winners: [], amounts: [], house: "0", poolBalanceBN: poolBalanceBN.toString() };
 
   allScores.sort((a, b) => (b.highest_score || 0) - (a.highest_score || 0));
-  const topPlayers = allScores.slice(0, 10); // max 10 players
+  const topPlayers = allScores.slice(0, 10);
 
-  // Compute house fee
-  const houseFeeBN = (poolBalanceBN * 30n) / 100n; // 30%
-  const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% to top players
+  // House takes 30%
+  const houseBN = (poolBalanceBN * 30n) / 100n;
+  const payoutPoolBN = poolBalanceBN - houseBN;
 
-  // Distribution percentages
-  const distributionPercents = [48n, 29n, 9n]; // first 3 players
-  const remainingPlayers = topPlayers.length - 3;
-  if (remainingPlayers > 0) {
-    for (let i = 0; i < remainingPlayers; i++) distributionPercents.push(2n); // 2% each
+  // Distribution percentages for top players
+  const distPercents = [48, 29, 9]; // 1st, 2nd, 3rd
+  const remaining = topPlayers.length - 3;
+  if (remaining > 0) {
+    const perPlayer = 14 / 7; // 2% each if 7 players
+    for (let i = 0; i < remaining; i++) distPercents.push(perPlayer);
   }
 
-  // Only take as many percentages as players exist
-  const percents = distributionPercents.slice(0, topPlayers.length);
+  // Adjust for fewer than 10 players
+  const totalPercent = distPercents.slice(0, topPlayers.length).reduce((a, b) => a + b, 0);
+  const adjustedPercents = distPercents.slice(0, topPlayers.length).map(p => (p * 70) / totalPercent);
 
-  // Compute total percent
-  const totalPercent = percents.reduce((a, b) => a + b, 0n);
-
-  // Compute payouts
+  // Compute each player's share in wei
   const winners = [];
   const amounts = [];
   let allocated = 0n;
@@ -312,22 +311,24 @@ export async function computeWinnersFromOffchain(contract, db) {
     const p = topPlayers[i];
     winners.push(p.user_address);
 
-    const share = (payoutPoolBN * percents[i]) / totalPercent;
+    // Convert percent to BigInt share
+    const share = (payoutPoolBN * BigInt(Math.floor(adjustedPercents[i] * 10000))) / 7000_0n;
     amounts.push(share);
     allocated += share;
   }
 
-  // Assign any remainder to first player to ensure exact payout
+  // Add remainder to first player to ensure exact distribution
   const remainder = payoutPoolBN - allocated;
   if (remainder > 0n) amounts[0] += remainder;
 
   return {
     winners,
-    amounts: amounts.map(a => a.toString()), // convert to string for on-chain
-    house: houseFeeBN.toString(),
+    amounts: amounts.map(a => a.toString()),
+    house: houseBN.toString(),
     poolBalanceBN: poolBalanceBN.toString()
   };
 }
+
 
 
 
