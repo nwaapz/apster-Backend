@@ -278,9 +278,11 @@ const job = cron.schedule(CRON_SCHEDULE, async () => {
   try {
     const { periodIndex } = computePeriod(Date.now()-1000, DURATION_MS);
     console.log("Cron processing period", periodIndex, new Date().toISOString());
-    await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit:GAS_LIMIT, pool });
-  } catch(err){ console.error("Cron error:", err); }
-}, { timezone:"UTC" });
+    await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit: GAS_LIMIT, pool });
+  } catch(err){
+    console.error("Cron error:", err);
+  }
+}, { timezone: "UTC", scheduled: false });
 job.stop();
 // Start
 app.listen(PORT, ()=>console.log(`Server listening on ${PORT}`));
