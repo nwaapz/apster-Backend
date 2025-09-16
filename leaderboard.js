@@ -306,7 +306,8 @@ export async function computeWinnersFromOffchain(contract, db) {
     winners.push(p.user_address);
 
     // Integer math: (payoutPool * player's percent) / total percentage
-    const share = (payoutBN * BigInt(usedPercents[i])) / BigInt(totalPercent);
+    // FIXED: Changed 'payoutBN' to 'payoutPoolBN'
+    const share = (payoutPoolBN * BigInt(usedPercents[i])) / BigInt(totalPercent);
     amounts.push(share);
     allocated += share;
   }
@@ -314,13 +315,13 @@ export async function computeWinnersFromOffchain(contract, db) {
   // Assign remainder (due to integer division) to first player
   const remainder = payoutPoolBN - allocated;
   if (remainder > 0n) amounts[0] += remainder;
-  
+
   // Re-verify that the total matches exactly
   let totalPaid = 0n;
   for (let i = 0; i < amounts.length; i++) {
     totalPaid += amounts[i];
   }
-  
+
   if (totalPaid !== payoutPoolBN) {
     console.error("Critical error: Total payouts do not match payout pool.");
     // This should not happen with the corrected logic, but is a good safeguard.
