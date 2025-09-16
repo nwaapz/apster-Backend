@@ -291,7 +291,7 @@ export async function computeWinnersFromOffchain(contract, db) {
   const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% to top players
 
   // Distribution percentages
-  const distributionPercents: bigint[] = [48n, 29n, 9n]; // first 3 players
+  const distributionPercents = [48n, 29n, 9n]; // first 3 players
   const remainingPlayers = topPlayers.length - 3;
   if (remainingPlayers > 0) {
     for (let i = 0; i < remainingPlayers; i++) distributionPercents.push(2n); // 2% each
@@ -304,8 +304,8 @@ export async function computeWinnersFromOffchain(contract, db) {
   const totalPercent = percents.reduce((a, b) => a + b, 0n);
 
   // Compute payouts
-  const winners: string[] = [];
-  const amounts: bigint[] = [];
+  const winners = [];
+  const amounts = [];
   let allocated = 0n;
 
   for (let i = 0; i < topPlayers.length; i++) {
@@ -328,6 +328,7 @@ export async function computeWinnersFromOffchain(contract, db) {
     poolBalanceBN: poolBalanceBN.toString()
   };
 }
+
 
 
 // ----------------------- Period processing (off-chain payouts) -----------------------
