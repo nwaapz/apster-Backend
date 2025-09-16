@@ -2,7 +2,7 @@
 import { ethers } from "ethers";
 
 /**
- * DB helper functions + on-chain logic for leaderboard
+ * DB helper functions + off-chain leaderboard logic
  *
  * Exports:
  *  - initDB(pool)
@@ -11,14 +11,13 @@ import { ethers } from "ethers";
  *  - savePeriod(pool, db, periodIndex, periodObj)
  *  - normalizeProfileName(name)
  *  - computePeriod(ts, DURATION_MS)
- *  - computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS)
- *  - processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, opts)
+ *  - computeWinnersFromOffchain(db, TOP_N, HOUSE_FEE_BPS)
+ *  - processPeriod(db, periodIndex, TOP_N, HOUSE_FEE_BPS, opts)
  *  - getLeaderboard(db, limit = 10, user = null)
  */
 
 // ----------------------- DB init & helpers -----------------------
 export async function initDB(pool) {
-  // Create tables (safe). Include level column in DDL.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS scores (
       user_address TEXT PRIMARY KEY,
@@ -189,16 +188,13 @@ export async function savePeriod(pool, db, periodIndex, periodObj) {
   };
 }
 
-
 // ----------------------- Misc helpers -----------------------
 export function normalizeProfileName(name) {
   return String(name || "").trim().toLowerCase();
 }
 
-// leaderboard.js
 export function computePeriod(ts, DURATION_MS) {
-  // Anchor to a known Friday 00:00 UTC
-  const FRIDAY_0_UTC = Date.UTC(2025, 0, 3, 0, 0, 0); // Jan 3, 2025 is Friday
+  const FRIDAY_0_UTC = Date.UTC(2025, 0, 3, 0, 0, 0);
   const periodIndex = Math.floor((ts - FRIDAY_0_UTC) / DURATION_MS);
   return {
     periodIndex,
@@ -207,22 +203,11 @@ export function computePeriod(ts, DURATION_MS) {
   };
 }
 
-
 // ----------------------- Leaderboard helper -----------------------
-/**
- * getLeaderboard(db, limit = 10, user = null)
- * - db: the in-memory db cache from initDB
- * - limit: number of top players to return
- * - user: optional user address (string) to include player's own record + rank
- *
- * Returns: { leaderboard: [...], player: { user_address, profile_name, score, level, rank|null } | null }
- */
 export function getLeaderboard(db, limit = 10, user = null) {
   if (!db || !db.scores) return { leaderboard: [], player: null };
 
   const allPlayers = Object.values(db.scores || {}).slice();
-
-  // sort descending by highest_score
   allPlayers.sort((a, b) => Number(b.highest_score || 0) - Number(a.highest_score || 0));
 
   const leaderboard = allPlayers.slice(0, limit).map((p, idx) => ({
@@ -238,7 +223,6 @@ export function getLeaderboard(db, limit = 10, user = null) {
     const normalized = String(user).trim().toLowerCase();
     const p = db.scores[normalized];
     if (p) {
-      // compute full rank across all players
       const rank = allPlayers.findIndex(x => x.user_address === normalized);
       playerRecord = {
         user_address: p.user_address,
@@ -247,81 +231,117 @@ export function getLeaderboard(db, limit = 10, user = null) {
         level: Number(p.level ?? 1),
         rank: rank >= 0 ? rank + 1 : null
       };
-    } else {
-      playerRecord = null;
     }
   }
 
   return { leaderboard, player: playerRecord };
 }
 
-// ----------------------- On-chain computation -----------------------
-export async function computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS) {
-  const players = await contract.getCurrentPlayers();
-  if (!players || players.length === 0) return { winners: [], amounts: [], poolBalanceBN: "0" };
+// ----------------------- Off-chain computation -----------------------
 
-  const deposits = await Promise.all(players.map(async p => {
-    const d = await contract.getPlayerDeposit(p);
-    // d may be BigNumber-like (ethers), convert to BigInt safely
-    return { addr: p, deposit: BigInt(d?.toString() ?? "0") };
-  }));
-
-  // sort descending by deposit
-  deposits.sort((a, b) => (b.deposit > a.deposit ? 1 : b.deposit < a.deposit ? -1 : 0));
-
-  const poolBalanceBN = BigInt((await contract.poolBalance()).toString());
-  if (poolBalanceBN === 0n) return { winners: [], amounts: [], poolBalanceBN: "0" };
-
-  const houseFeeTotal = (poolBalanceBN * BigInt(HOUSE_FEE_BPS)) / 10000n;
-  const payoutPool = poolBalanceBN - houseFeeTotal;
-
-  let split;
-  if (TOP_N === 1) split = [100];
-  else if (TOP_N === 2) split = [60, 40];
-  else if (TOP_N === 3) split = [50, 30, 20];
-  else {
-    const base = Math.floor(100 / TOP_N);
-    split = Array.from({ length: TOP_N }, () => base);
-    let rem = 100 - base * TOP_N;
-    for (let i = 0; rem > 0 && i < split.length; i++, rem--) split[i] += 1;
+// Compute winners using off-chain leaderboard, but read poolBalance on-chain to determine amounts
+export async function computeWinnersFromOffchain(contract, db, TOP_N, HOUSE_FEE_BPS) {
+  // read current players from DB (off-chain leaderboard) and on-chain pool balance
+  // ensure contract exists and poolBalance can be read
+  let poolBalanceBN = 0n;
+  try {
+    const pb = await contract.poolBalance();
+    // pb may be bigint already (ethers v6) or a BigNumber-like
+    poolBalanceBN = typeof pb === "bigint" ? pb : BigInt(pb?.toString?.() ?? "0");
+  } catch (err) {
+    // If we can't read poolBalance, return empty result
+    console.error("computeWinnersFromOffchain: cannot read poolBalance:", err);
+    return { winners: [], amounts: [], house1: "0", house2: "0", poolBalanceBN: "0" };
   }
 
+  if (poolBalanceBN === 0n) return { winners: [], amounts: [], house1: "0", house2: "0", poolBalanceBN: "0" };
+
+  // Get top players from off-chain scores in db
+  const allScores = Object.values(db.scores || {});
+  if (!allScores || allScores.length === 0) {
+    return { winners: [], amounts: [], house1: "0", house2: "0", poolBalanceBN: poolBalanceBN.toString() };
+  }
+
+  // Sort by highest_score descending
+  allScores.sort((a, b) => (b.highest_score || 0) - (a.highest_score || 0));
+  const topPlayers = allScores.slice(0, TOP_N);
+
+  if (topPlayers.length === 0) {
+    return { winners: [], amounts: [], house1: "0", house2: "0", poolBalanceBN: poolBalanceBN.toString() };
+  }
+
+  // Compute house fee and payout pool
+  const houseFeeTotal = (poolBalanceBN * BigInt(HOUSE_FEE_BPS)) / 10000n; // e.g. 20% -> 2000/10000
+  const payoutPool = poolBalanceBN - houseFeeTotal;
+
+  // Sum scores among top players (for proportional split)
+  let totalScore = 0n;
+  for (const p of topPlayers) totalScore += BigInt(p.highest_score || 0);
+
+  // Create winners & amounts in wei (BigInt)
   const winners = [];
-  const amounts = [];
-  for (let i = 0; i < Math.min(TOP_N, deposits.length); i++) {
-    const pct = BigInt(split[i] ?? 0);
-    const amount = (payoutPool * pct) / 100n;
-    if (amount > 0n) {
-      winners.push(deposits[i].addr);
-      amounts.push(amount.toString());
+  const amountsBi = [];
+  let allocated = 0n;
+
+  if (totalScore > 0n) {
+    for (let i = 0; i < topPlayers.length; i++) {
+      const p = topPlayers[i];
+      winners.push(p.user_address);
+      // floor division for each share
+      const share = (payoutPool * BigInt(p.highest_score || 0)) / totalScore;
+      amountsBi.push(share);
+      allocated += share;
+    }
+  } else {
+    // if all scores 0, split equally
+    const each = payoutPool / BigInt(topPlayers.length);
+    for (let i = 0; i < topPlayers.length; i++) {
+      winners.push(topPlayers[i].user_address);
+      amountsBi.push(each);
+      allocated += each;
     }
   }
 
-  const w1pct = 50, w2pct = 50;
-  const house1 = (houseFeeTotal * BigInt(w1pct)) / 100n;
-  const house2 = houseFeeTotal - house1;
+  // Remainder due to integer division: assign to top (or last) to ensure full distribution
+  const remainder = payoutPool - allocated;
+  if (remainder > 0n) {
+    // add remainder to the first winner (highest score) to keep deterministic
+    amountsBi[0] = amountsBi[0] + remainder;
+  }
 
-  return { winners, amounts, house1: house1.toString(), house2: house2.toString(), poolBalanceBN: poolBalanceBN.toString() };
+  // Split house fee between two house wallets 50/50 (you can change split rules)
+  const house1 = houseFeeTotal / 2n;
+  const house2 = houseFeeTotal - house1; // remainder to house2 if odd
+
+  // Convert amounts to decimal string representation (wei) for returning
+  const amounts = amountsBi.map(a => a.toString());
+
+  return {
+    winners,
+    amounts,            // array of strings (wei) suitable for passing to contract.payPlayers
+    house1: house1.toString(),
+    house2: house2.toString(),
+    poolBalanceBN: poolBalanceBN.toString()
+  };
 }
-
-// ----------------------- Period processing (on-chain payouts) -----------------------
+// ----------------------- Period processing (off-chain payouts) -----------------------
 export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, opts = {}) {
   const pool = opts.pool;
   if (!db.periods) db.periods = {};
   const existing = db.periods[periodIndex];
-  if (existing?.status === "processing" || existing?.status === "paid")
-    {
-
-      console.log(`Period ${periodIndex} is already being processed or paid.`);
-      return;
-    } 
+  if (existing?.status === "processing" || existing?.status === "paid") {
+    console.log(`Period ${periodIndex} is already being processed or paid.`);
+    return;
+  }
 
   const nowIso = new Date().toISOString();
   db.periods[periodIndex] = { status: "processing", updated_at: nowIso };
   if (pool) await savePeriod(pool, db, periodIndex, db.periods[periodIndex]);
 
   try {
-    const result = await computeWinnersFromOnchain(contract, TOP_N, HOUSE_FEE_BPS);
+    // Compute winners using *off-chain* leaderboard but read poolBalance on-chain inside function
+    const result = await computeWinnersFromOffchain(contract, db, TOP_N, HOUSE_FEE_BPS);
+
     if (!result.winners || result.winners.length === 0) {
       const periodObj = { status: "paid", payouts: [], updated_at: new Date().toISOString() };
       db.periods[periodIndex] = periodObj;
@@ -330,26 +350,47 @@ export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_
     }
 
     const winners = result.winners;
-    const amounts = result.amounts.map(a => BigInt(a));
+    const amounts = result.amounts.map(a => BigInt(a)); // BigInt values for contract call
+    // call on-chain contract to pay players (must be owner-signer contract)
+    let tx = null;
+    try {
+      tx = await contract.payPlayers(winners, amounts, { ...(opts.gasLimit ? { gasLimit: opts.gasLimit } : {}) });
+      if (tx?.wait) await tx.wait(1);
+    } catch (err) {
+      // If payPlayers failed, log and mark failed
+      console.error("payPlayers failed:", err);
+      throw err;
+    }
 
-    const tx = await contract.payPlayers(winners, amounts, { ...(opts.gasLimit ? { gasLimit: opts.gasLimit } : {}) });
-    if (tx?.wait) await tx.wait(1);
-
+    // Pay house - only if house amounts > 0
     const h1 = BigInt(result.house1 || "0");
     const h2 = BigInt(result.house2 || "0");
-    if (h1 > 0n || h2 > 0n) {
-      const tx2 = await contract.payHouse(h1, h2);
-      if (tx2?.wait) await tx2.wait(1);
+    if ((h1 > 0n || h2 > 0n) && typeof contract.payHouse === "function") {
+      try {
+        const tx2 = await contract.payHouse(h1, h2);
+        if (tx2?.wait) await tx2.wait(1);
+      } catch (err) {
+        console.error("payHouse failed:", err);
+        // you can choose to continue or throw; throwing marks the period failed
+        throw err;
+      }
     }
 
+    // Reset payments on-chain if function exists (owner only)
     if (typeof contract.resetPayments === "function") {
-      const resetTx = await contract.resetPayments();
-      if (resetTx?.wait) await resetTx.wait(1);
+      try {
+        const resetTx = await contract.resetPayments();
+        if (resetTx?.wait) await resetTx.wait(1);
+      } catch (err) {
+        console.error("resetPayments() failed:", err);
+        // Not fatal — log and continue
+      }
     }
 
+    // Save period result (use tx.hash)
     const periodObj = {
       status: "paid",
-      txHash: tx.hash || null,
+      txHash: tx?.hash || null,
       payouts: winners.map((w, i) => ({ to: w, amount: amounts[i].toString() })),
       updated_at: new Date().toISOString()
     };
@@ -371,7 +412,7 @@ export default {
   savePeriod,
   normalizeProfileName,
   computePeriod,
-  computeWinnersFromOnchain,
+  computeWinnersFromOffchain,
   processPeriod,
   getLeaderboard
 };

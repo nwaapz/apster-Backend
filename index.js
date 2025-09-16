@@ -298,21 +298,57 @@ app.get("/api/period", (req,res) => {
 });
 
 app.post("/admin/wipe-leaderboard", async (req, res) => {
-  if (!(await isAdminAuthed(req))) return res.status(403).json({ ok:false, error:"Not authorized" });
+  if (!(await isAdminAuthed(req))) return res.status(403).json({ ok: false, error: "Not authorized" });
+
   try {
+    // Reset scores in a transaction (preserve profile_names table and owner_address)
     await pool.query("BEGIN");
-    await pool.query("DELETE FROM profile_names");
-    await pool.query("DELETE FROM scores");
+
+    // Reset numeric/score fields for all players
+    await pool.query(`
+      UPDATE scores
+      SET highest_score = 0,
+          last_score = NULL,
+          games_played = 0,
+          level = 1,
+          last_updated = NOW()
+    `);
+
     await pool.query("COMMIT");
+
+    // Reload in-memory cache (scores)
+    const scoresRes = await pool.query(`SELECT * FROM scores`);
     db.scores = {};
-    db.profileNames = {};
-    return res.json({ ok:true, message: "Leaderboard wiped from DB and memory" });
-  }  catch (err) {
-      try { await pool.query("ROLLBACK"); } catch(e) {}
-      console.error("wipe-leaderboard error:", err.stack || err);
-      return res.status(500).json({ ok:false, error:String(err) });
+    for (const r of scoresRes.rows) {
+      const addr = (r.user_address || "").toLowerCase();
+      if (!addr) continue;
+      db.scores[addr] = {
+        user_address: addr,
+        profile_name: r.profile_name || null,
+        email: r.email || null,
+        highest_score: Number(r.highest_score ?? 0),
+        last_score: r.last_score === null ? null : Number(r.last_score),
+        games_played: Number(r.games_played ?? 0),
+        level: Number(r.level ?? 1),
+        last_updated: r.last_updated ? new Date(r.last_updated).toISOString() : new Date().toISOString()
+      };
     }
+
+    // Reload profile names mapping (left intact in DB)
+    const profileRes = await pool.query(`SELECT normalized_name, owner_address FROM profile_names`);
+    db.profileNames = {};
+    for (const r of profileRes.rows) {
+      db.profileNames[r.normalized_name] = r.owner_address ? r.owner_address.toLowerCase() : null;
+    }
+
+    return res.json({ ok: true, message: "Leaderboard cleared (scores reset). Player profiles and owner addresses preserved." });
+  } catch (err) {
+    try { await pool.query("ROLLBACK"); } catch (e) {}
+    console.error("wipe-leaderboard error:", err.stack || err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
 });
+
 
 // In your index.js (development only)
 app.post("/admin/wipe-periods", async (req, res) => {
