@@ -83,7 +83,7 @@ registerAdminRoutes(app, db, {
   pool,
   adminSecret: ADMIN_SECRET,
   contractAddress: CONTRACT_ADDRESS,
-  contractAbi: WagerPoolSingleEntryABI,
+  contractAbi: contractJson.abi, // ✅ use this instead
   rpcUrl: RPC_URL
 });
 
