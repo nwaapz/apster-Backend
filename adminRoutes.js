@@ -1,6 +1,8 @@
 // adminRoutes.js
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
+import { ethers } from "ethers";
+
 
 export default function registerAdminRoutes(app, db, opts = {}) {
   const ADMIN_SECRET = opts.adminSecret ?? null;
@@ -119,6 +121,37 @@ export default function registerAdminRoutes(app, db, opts = {}) {
       req.on("error", reject);
     });
   }
+
+
+  async function getContractData(contract) {
+  try {
+    const balance = await contract.provider.getBalance(contract.address);
+
+    // Assuming your contract has a method like `getCurrentPlayers()`
+    const currentPlayers = await contract.getCurrentPlayers();
+
+    // And a mapping `playerPaid(address) -> uint` or similar
+    const playerPayments = {};
+    for (const addr of currentPlayers) {
+      try {
+        const paid = await contract.playerPaid(addr); // adjust to your contract method
+        playerPayments[addr] = ethers.utils.formatEther(paid);
+      } catch (err) {
+        console.error("Error fetching payment for", addr, err);
+        playerPayments[addr] = "Error";
+      }
+    }
+
+    return {
+      balance: ethers.utils.formatEther(balance),
+      playerPayments
+    };
+  } catch (err) {
+    console.error("getContractData error:", err);
+    return { balance: "Error", playerPayments: {} };
+  }
+}
+
 
   // --- Routes ---
   app.get("/admin/login", async (req, res) => {
@@ -282,54 +315,95 @@ export default function registerAdminRoutes(app, db, opts = {}) {
   });
 
   // Viewer & JSON download
-  app.get("/admin/db-view", async (req, res) => {
-    if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
+app.get("/admin/db-view", async (req, res) => {
+  if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
 
-    // Build snapshot from provided db cache
-    const snapshot = {
-      scores: { ...(db.scores || {}) },
-      periods: { ...(db.periods || {}) },
-      profileNames: { ...(db.profileNames || {}) },
-    };
+  // Build snapshot from provided db cache
+  const snapshot = {
+    scores: { ...(db.scores || {}) },
+    periods: { ...(db.periods || {}) },
+    profileNames: { ...(db.profileNames || {}) },
+  };
 
-    const scoreRows = Object.values(snapshot.scores).map(s => ({
-      user_address: s.user_address || "",
-      profile_name: s.profile_name || "",
-      email: s.email || "",
-      highest_score: String(s.highest_score ?? ""),
-      last_score: String(s.last_score ?? ""),
-      games_played: String(s.games_played ?? ""),
-      last_updated: s.last_updated || ""
-    }));
-    const scoreTable = buildTable(
-      ["user_address", "profile_name", "email", "highest_score", "last_score", "games_played", "last_updated"],
-      scoreRows
-    );
+  // --- Contract data ---
+  let contractInfo = { balance: "N/A", playerPayments: {} };
+  if (opts.contract) {
+    try {
+      const balance = await opts.contract.provider.getBalance(opts.contract.address);
+      const currentPlayers = await opts.contract.getCurrentPlayers();
+      const playerPayments = {};
 
-    const periodRows = Object.entries(snapshot.periods).map(([idx, p]) => ({
-      periodIndex: idx,
-      status: p.status || "",
-      txHash: p.txHash || "",
-      payouts: p.payouts ? JSON.stringify(p.payouts, null, 0) : "",
-      error: p.error || "",
-      updated_at: p.updated_at || ""
-    }));
-    const periodsTable = buildTable(
-      ["periodIndex", "status", "txHash", "payouts", "error", "updated_at"],
-      periodRows
-    );
+      // fetch payments in parallel for speed
+      await Promise.all(currentPlayers.map(async (addr) => {
+        try {
+          const paid = await opts.contract.playerPaid(addr); // adjust to your contract method
+          playerPayments[addr] = ethers.utils.formatEther(paid);
+        } catch (err) {
+          console.error("Error fetching payment for", addr, err);
+          playerPayments[addr] = "Error";
+        }
+      }));
 
-    const profileRows = Object.entries(snapshot.profileNames).map(([norm, owner]) => ({
-      normalized_name: norm,
-      owner_address: owner
-    }));
-    const profileTable = buildTable(["normalized_name", "owner_address"], profileRows);
+      contractInfo.balance = ethers.utils.formatEther(balance);
+      contractInfo.playerPayments = playerPayments;
+    } catch (err) {
+      console.error("Contract data fetch error:", err);
+    }
+  }
 
-    const html = `<!doctype html>
+  const balanceTable = buildTable(
+    ["Contract Balance (ETH)"],
+    [{ "Contract Balance (ETH)": contractInfo.balance }]
+  );
+
+  const paymentsRows = Object.entries(contractInfo.playerPayments).map(([addr, amt]) => ({
+    player: addr,
+    paid: amt
+  }));
+  const paymentsTable = buildTable(["player", "paid"], paymentsRows);
+
+  // --- Scores table ---
+  const scoreRows = Object.values(snapshot.scores).map(s => ({
+    user_address: s.user_address || "",
+    profile_name: s.profile_name || "",
+    email: s.email || "",
+    highest_score: String(s.highest_score ?? ""),
+    last_score: String(s.last_score ?? ""),
+    games_played: String(s.games_played ?? ""),
+    last_updated: s.last_updated || ""
+  }));
+  const scoreTable = buildTable(
+    ["user_address", "profile_name", "email", "highest_score", "last_score", "games_played", "last_updated"],
+    scoreRows
+  );
+
+  // --- Periods table ---
+  const periodRows = Object.entries(snapshot.periods).map(([idx, p]) => ({
+    periodIndex: idx,
+    status: p.status || "",
+    txHash: p.txHash || "",
+    payouts: p.payouts ? JSON.stringify(p.payouts, null, 0) : "",
+    error: p.error || "",
+    updated_at: p.updated_at || ""
+  }));
+  const periodsTable = buildTable(
+    ["periodIndex", "status", "txHash", "payouts", "error", "updated_at"],
+    periodRows
+  );
+
+  // --- Profile names table ---
+  const profileRows = Object.entries(snapshot.profileNames).map(([norm, owner]) => ({
+    normalized_name: norm,
+    owner_address: owner
+  }));
+  const profileTable = buildTable(["normalized_name", "owner_address"], profileRows);
+
+  // --- HTML ---
+  const html = `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>DB Viewer</title>
+  <title>DB Viewer + Contract Data</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>body{padding:20px;}</style>
@@ -337,12 +411,22 @@ export default function registerAdminRoutes(app, db, opts = {}) {
 <body>
   <div class="container-fluid">
     <div class="d-flex justify-content-between align-items-center mb-3">
-      <h3>In-memory DB Viewer</h3>
+      <h3>In-memory DB Viewer + Contract Data</h3>
       <div>
         <a class="btn btn-sm btn-outline-primary" href="/admin/db-download">Download JSON</a>
         <a class="btn btn-sm btn-outline-secondary" href="/admin/logout">Logout</a>
         <button class="btn btn-sm btn-outline-secondary" onclick="location.reload()">Refresh</button>
       </div>
+    </div>
+
+    <div class="mb-4">
+      <h5>Contract Balance</h5>
+      ${balanceTable}
+    </div>
+
+    <div class="mb-4">
+      <h5>Player Payments</h5>
+      ${paymentsTable}
     </div>
 
     <div class="mb-4">
@@ -365,9 +449,10 @@ export default function registerAdminRoutes(app, db, opts = {}) {
 </body>
 </html>`;
 
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(html);
-  });
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(html);
+});
+
 
   app.get("/admin/db-download", async (req, res) => {
     if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
