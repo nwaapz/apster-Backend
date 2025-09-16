@@ -329,12 +329,17 @@ app.get("/admin/db-view", async (req, res) => {
   let contractInfo = { balance: "N/A", playerDeposits: {}, hasPaidStatus: {} };
   if (opts.contract) {
     try {
-      const contract = opts.contract; // Make sure this is the same instance as in index.js
+      const contract = opts.contract;
 
-      // Contract balance (ETH)
+      // Contract balance
       try {
-        const balance = await contract.provider.getBalance(contract.address);
-        contractInfo.balance = ethers.utils.formatEther(balance);
+        let balance;
+        if (contract.provider && contract.address) {
+          balance = await contract.provider.getBalance(contract.address);
+        } else if (typeof contract.poolBalance === "function") {
+          balance = await contract.poolBalance();
+        }
+        contractInfo.balance = balance ? ethers.utils.formatEther(balance) : "0";
       } catch (err) {
         console.error("Error fetching balance:", err);
         contractInfo.balance = "Error";
@@ -343,7 +348,9 @@ app.get("/admin/db-view", async (req, res) => {
       // Current players
       let currentPlayers = [];
       try {
-        currentPlayers = await contract.getCurrentPlayers();
+        currentPlayers = Array.isArray(await contract.getCurrentPlayers())
+          ? await contract.getCurrentPlayers()
+          : [];
       } catch (err) {
         console.error("getCurrentPlayers() failed:", err);
       }
@@ -352,14 +359,19 @@ app.get("/admin/db-view", async (req, res) => {
       const playerDeposits = {};
       const hasPaidStatus = {};
       for (const addr of currentPlayers) {
+        // Deposit
         try {
-          const deposit = await contract.getPlayerDeposit(addr);
-          playerDeposits[addr] = ethers.utils.formatEther(deposit);
+          let deposit = await contract.getPlayerDeposit(addr);
+          // handle BigNumber or number
+          if (deposit && deposit._isBigNumber) deposit = ethers.utils.formatEther(deposit);
+          else deposit = String(deposit ?? 0);
+          playerDeposits[addr] = deposit;
         } catch (err) {
           console.error(`Error fetching deposit for ${addr}:`, err);
           playerDeposits[addr] = "Error";
         }
 
+        // HasPaid
         try {
           const paid = await contract.hasPaid(addr);
           hasPaidStatus[addr] = paid ? "Yes" : "No";
@@ -371,7 +383,6 @@ app.get("/admin/db-view", async (req, res) => {
 
       contractInfo.playerDeposits = playerDeposits;
       contractInfo.hasPaidStatus = hasPaidStatus;
-
     } catch (err) {
       console.error("Contract info fetch failed:", err);
       contractInfo = { balance: "Error", playerDeposits: {}, hasPaidStatus: {} };
@@ -478,6 +489,7 @@ app.get("/admin/db-view", async (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
+
 
 
 
