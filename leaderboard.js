@@ -266,74 +266,76 @@ export function getLeaderboard(db, limit = 10, user = null) {
 // ----------------------- Off-chain computation -----------------------
 
 // Compute winners using off-chain leaderboard, but read poolBalance on-chain to determine amounts
+// ----------------------- Off-chain computation -----------------------
+
+// Compute winners using off-chain leaderboard, but read poolBalance on-chain to determine amounts
 export async function computeWinnersFromOffchain(contract, db) {
-  // Read pool balance from contract
-  let poolBalanceBN = 0n;
-  try {
-    const pb = await contract.poolBalance();
-    poolBalanceBN = typeof pb === "bigint" ? pb : BigInt(pb?.toString?.() ?? "0");
-  } catch (err) {
-    console.error("Cannot read poolBalance:", err);
-    return { winners: [], amounts: [], house: "0", poolBalanceBN: "0" };
-  }
+  // Read pool balance from contract
+  let poolBalanceBN = 0n;
+  try {
+    const pb = await contract.poolBalance();
+    poolBalanceBN = typeof pb === "bigint" ? pb : BigInt(pb?.toString?.() ?? "0");
+  } catch (err) {
+    console.error("Cannot read poolBalance:", err);
+    return { winners: [], amounts: [], house: "0", poolBalanceBN: "0" };
+  }
 
-  if (poolBalanceBN === 0n) return { winners: [], amounts: [], house: "0", poolBalanceBN: "0" };
+  if (poolBalanceBN === 0n) return { winners: [], amounts: [], house: "0", poolBalanceBN: "0" };
 
-  // Get top players
-  const allScores = Object.values(db.scores || {});
-  if (!allScores.length) return { winners: [], amounts: [], house: "0", poolBalanceBN: poolBalanceBN.toString() };
+  // Get top players
+  const allScores = Object.values(db.scores || {});
+  if (!allScores.length) return { winners: [], amounts: [], house: "0", poolBalanceBN: poolBalanceBN.toString() };
 
-  allScores.sort((a, b) => (b.highest_score || 0) - (a.highest_score || 0));
-  const topPlayers = allScores.slice(0, 10); // max 10 players
+  allScores.sort((a, b) => (b.highest_score || 0) - (a.highest_score || 0));
+  const topPlayers = allScores.slice(0, 10); // max 10 players
 
-  // Compute house fee
-  const houseFeeBN = (poolBalanceBN * 30n) / 100n; // 30% for house
-  const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% for players
+  // Compute house fee
+  const houseFeeBN = (poolBalanceBN * 30n) / 100n; // 30% for house
+  const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% for players
 
-  // Base percentages for 10 players
-  const basePercents = [48, 29, 9, 2, 2, 2, 2, 2, 2, 2]; // sum = 100
-  const usedPercents = basePercents.slice(0, topPlayers.length);
+  // Payout percentages as per your description
+  // All percentages are of the 70% payout pool
+  const playerPercents = [48, 29, 9, 2, 2, 2, 2, 2, 2, 2]; // Total sum = 100
+  
+  const winners = [];
+  const amounts = [];
+  let allocated = 0n;
 
-  // Use a common denominator to perform integer-based percentage calculation
-  const totalPercent = usedPercents.reduce((a, b) => a + b, 0);
+  // Calculate payouts for top players based on their percentages
+  for (let i = 0; i < topPlayers.length; i++) {
+    const p = topPlayers[i];
+    winners.push(p.user_address);
 
-  // Compute amounts using only BigInts and integer math
-  const winners = [];
-  const amounts = [];
-  let allocated = 0n;
-  for (let i = 0; i < topPlayers.length; i++) {
-    const p = topPlayers[i];
-    winners.push(p.user_address);
+    const playerSharePercent = playerPercents[i];
+    let share;
 
-    // Integer math: (payoutPool * player's percent) / total percentage
-    // FIXED: Changed 'payoutBN' to 'payoutPoolBN'
-    const share = (payoutPoolBN * BigInt(usedPercents[i])) / BigInt(totalPercent);
-    amounts.push(share);
-    allocated += share;
-  }
+    // If there are fewer than 10 players, distribute the remaining percentages
+    // This ensures that all 70% is distributed to the available winners
+    if (topPlayers.length < 10 && i === topPlayers.length - 1) {
+      // Calculate the sum of all remaining percentages
+      const remainingPercentSum = playerPercents.slice(i).reduce((a, b) => a + b, 0);
+      
+      // Calculate this player's share based on the sum of all remaining percents
+      share = (payoutPoolBN * BigInt(remainingPercentSum)) / 100n;
+    } else {
+      // Normal calculation: (payoutPool * player's percent) / 100
+      share = (payoutPoolBN * BigInt(playerSharePercent)) / 100n;
+    }
 
-  // Assign remainder (due to integer division) to first player
-  const remainder = payoutPoolBN - allocated;
-  if (remainder > 0n) amounts[0] += remainder;
+    amounts.push(share);
+    allocated += share;
+  }
 
-  // Re-verify that the total matches exactly
-  let totalPaid = 0n;
-  for (let i = 0; i < amounts.length; i++) {
-    totalPaid += amounts[i];
-  }
+  // Assign any remaining wei due to integer division to the first player
+  const remainder = payoutPoolBN - allocated;
+  if (remainder > 0n) amounts[0] += remainder;
 
-  if (totalPaid !== payoutPoolBN) {
-    console.error("Critical error: Total payouts do not match payout pool.");
-    // This should not happen with the corrected logic, but is a good safeguard.
-    return { winners: [], amounts: [], house: "0", poolBalanceBN: poolBalanceBN.toString() };
-  }
-
-  return {
-    winners,
-    amounts: amounts.map(a => a.toString()), // array of strings (wei)
-    house: houseFeeBN.toString(),
-    poolBalanceBN: poolBalanceBN.toString()
-  };
+  return {
+    winners,
+    amounts: amounts.map(a => a.toString()), // array of strings (wei)
+    house: houseFeeBN.toString(),
+    poolBalanceBN: poolBalanceBN.toString()
+  };
 }
 
 
