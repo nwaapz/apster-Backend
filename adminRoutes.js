@@ -314,6 +314,8 @@ export default function registerAdminRoutes(app, db, opts = {}) {
     }
   });
 
+
+
   // Viewer & JSON download
 app.get("/admin/db-view", async (req, res) => {
   if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
@@ -328,11 +330,16 @@ app.get("/admin/db-view", async (req, res) => {
 
   if (opts.contract) {
     const contract = opts.contract;
+
     try {
       // --- Pool balance ---
       try {
         const poolBN = await contract.poolBalance(); // uint256
-        contractInfo.balance = poolBN ? ethers.utils.formatEther(poolBN) : "0";
+        if (poolBN && ethers.BigNumber.isBigNumber(poolBN)) {
+          contractInfo.balance = ethers.utils.formatEther(poolBN);
+        } else {
+          contractInfo.balance = "0";
+        }
       } catch (err) {
         console.error("Error fetching pool balance:", err);
         contractInfo.balance = "Error";
@@ -350,12 +357,13 @@ app.get("/admin/db-view", async (req, res) => {
       // --- Player deposits & hasPaid ---
       const playerDeposits = {};
       const hasPaidStatus = {};
+
       for (const addr of currentPlayers) {
         // Deposit
         try {
           let depositBN = await contract.getPlayerDeposit(addr);
           depositBN = depositBN ?? ethers.BigNumber.from(0);
-          playerDeposits[addr] = ethers.utils.formatEther(depositBN); // **Convert wei to ETH**
+          playerDeposits[addr] = ethers.utils.formatEther(depositBN);
         } catch (err) {
           console.error(`Error fetching deposit for ${addr}:`, err);
           playerDeposits[addr] = "Error";
@@ -373,7 +381,6 @@ app.get("/admin/db-view", async (req, res) => {
 
       contractInfo.playerDeposits = playerDeposits;
       contractInfo.hasPaidStatus = hasPaidStatus;
-
     } catch (err) {
       console.error("Contract info fetch failed:", err);
       contractInfo = { balance: "Error", playerDeposits: {}, hasPaidStatus: {} };
