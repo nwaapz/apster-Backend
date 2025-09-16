@@ -56,6 +56,8 @@ const contractJson = JSON.parse(fs.readFileSync(ABI_PATH, "utf8"));
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, contractJson.abi, ownerWallet);
+const readOnlyContract = new ethers.Contract(CONTRACT_ADDRESS, contractJson.abi, provider);
+
 
 // --- Postgres pool ---
 if (!process.env.DATABASE_URL) {
@@ -90,8 +92,9 @@ app.use(express.json());
 registerAdminRoutes(app, db, {
   pool,
   adminSecret: ADMIN_SECRET,
-  contract // <-- pass the ethers.Contract instance
+  contract: readOnlyContract // <-- read-only for dashboard
 });
+
 
 
 

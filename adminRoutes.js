@@ -331,9 +331,14 @@ app.get("/admin/db-view", async (req, res) => {
     try {
       const contract = opts.contract;
 
-      // Contract balance
-      const balance = await contract.provider.getBalance(contract.address);
-      contractInfo.balance = ethers.utils.formatEther(balance);
+      // Contract balance (internal poolBalance)
+      try {
+        const balance = await contract.poolBalance();
+        contractInfo.balance = ethers.utils.formatEther(balance);
+      } catch (err) {
+        console.error("Error fetching poolBalance:", err);
+        contractInfo.balance = "Error";
+      }
 
       // Current players
       let currentPlayers = [];
@@ -347,16 +352,18 @@ app.get("/admin/db-view", async (req, res) => {
       const playerDeposits = {};
       const hasPaidStatus = {};
       await Promise.all(currentPlayers.map(async (addr) => {
+        // Deposit
         try {
-          let deposit = await contract.GetPlayerDeposit(addr);
+          const deposit = await contract.getPlayerDeposit(addr);
           playerDeposits[addr] = ethers.utils.formatEther(deposit);
         } catch (err) {
           console.error(`Error fetching deposit for ${addr}:`, err);
           playerDeposits[addr] = "Error";
         }
 
+        // HasPaid
         try {
-          let paid = await contract.hasPaid(addr);
+          const paid = await contract.hasPaid(addr);
           hasPaidStatus[addr] = paid ? "Yes" : "No";
         } catch (err) {
           console.error(`Error fetching hasPaid for ${addr}:`, err);
@@ -473,7 +480,6 @@ app.get("/admin/db-view", async (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
-
 
 
 
