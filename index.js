@@ -86,13 +86,13 @@ app.use(express.json());
 // Register admin routes, provide pool to adminRoutes
 
 
+// Register admin routes, provide pool and contract instance to adminRoutes
 registerAdminRoutes(app, db, {
   pool,
   adminSecret: ADMIN_SECRET,
-  contractAddress: CONTRACT_ADDRESS,
-  contractAbi: contractJson.abi, // ✅ use this instead
-  rpcUrl: RPC_URL
+  contract // <-- pass the ethers.Contract instance
 });
+
 
 
 // Root
