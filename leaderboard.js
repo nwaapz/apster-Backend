@@ -158,6 +158,8 @@ export async function saveProfileName(pool, db, normalized, owner_address) {
 }
 
 export async function savePeriod(pool, db, periodIndex, periodObj) {
+  const payoutsJson = periodObj.payouts ? JSON.stringify(periodObj.payouts) : null;
+
   await pool.query(
     `INSERT INTO periods(period_index, status, tx_hash, payouts, error, updated_at)
      VALUES($1,$2,$3,$4,$5,$6)
@@ -167,18 +169,26 @@ export async function savePeriod(pool, db, periodIndex, periodObj) {
          payouts = EXCLUDED.payouts,
          error = EXCLUDED.error,
          updated_at = EXCLUDED.updated_at`,
-    [String(periodIndex), periodObj.status || null, periodObj.txHash || null, periodObj.payouts ? periodObj.payouts : null, periodObj.error || null, periodObj.updated_at || new Date().toISOString()]
+    [
+      String(periodIndex),
+      periodObj.status || null,
+      periodObj.txHash || null,
+      payoutsJson,
+      periodObj.error || null,
+      periodObj.updated_at || new Date().toISOString()
+    ]
   );
 
   db.periods[String(periodIndex)] = {
     periodIndex: Number(periodIndex),
     status: periodObj.status || null,
     txHash: periodObj.txHash || null,
-    payouts: periodObj.payouts || null,
+    payouts: periodObj.payouts || null, // keep native array in memory
     error: periodObj.error || null,
     updated_at: periodObj.updated_at || new Date().toISOString()
   };
 }
+
 
 // ----------------------- Misc helpers -----------------------
 export function normalizeProfileName(name) {
