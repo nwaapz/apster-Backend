@@ -318,51 +318,74 @@ export default function registerAdminRoutes(app, db, opts = {}) {
 app.get("/admin/db-view", async (req, res) => {
   if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
 
-  // Build snapshot from provided db cache
+  // Build snapshot from in-memory DB cache
   const snapshot = {
     scores: { ...(db.scores || {}) },
     periods: { ...(db.periods || {}) },
     profileNames: { ...(db.profileNames || {}) },
   };
 
-  // --- Contract data ---
-  let contractInfo = { balance: "N/A", playerPayments: {} };
+  // --- Contract info ---
+  let contractInfo = { balance: "N/A", playerDeposits: {}, hasPaidStatus: {} };
   if (opts.contract) {
     try {
-      const balance = await opts.contract.provider.getBalance(opts.contract.address);
-      const currentPlayers = await opts.contract.getCurrentPlayers();
-      const playerPayments = {};
+      const contract = opts.contract;
 
-      // fetch payments in parallel for speed
+      // Contract balance
+      const balance = await contract.provider.getBalance(contract.address);
+      contractInfo.balance = ethers.utils.formatEther(balance);
+
+      // Current players
+      let currentPlayers = [];
+      try {
+        currentPlayers = await contract.getCurrentPlayers();
+      } catch (err) {
+        console.error("getCurrentPlayers() failed:", err);
+      }
+
+      // Player deposits & hasPaid status
+      const playerDeposits = {};
+      const hasPaidStatus = {};
       await Promise.all(currentPlayers.map(async (addr) => {
         try {
-          const paid = await opts.contract.playerPaid(addr); // adjust to your contract method
-          playerPayments[addr] = ethers.utils.formatEther(paid);
+          let deposit = await contract.GetPlayerDeposit(addr);
+          playerDeposits[addr] = ethers.utils.formatEther(deposit);
         } catch (err) {
-          console.error("Error fetching payment for", addr, err);
-          playerPayments[addr] = "Error";
+          console.error(`Error fetching deposit for ${addr}:`, err);
+          playerDeposits[addr] = "Error";
+        }
+
+        try {
+          let paid = await contract.hasPaid(addr);
+          hasPaidStatus[addr] = paid ? "Yes" : "No";
+        } catch (err) {
+          console.error(`Error fetching hasPaid for ${addr}:`, err);
+          hasPaidStatus[addr] = "Error";
         }
       }));
 
-      contractInfo.balance = ethers.utils.formatEther(balance);
-      contractInfo.playerPayments = playerPayments;
+      contractInfo.playerDeposits = playerDeposits;
+      contractInfo.hasPaidStatus = hasPaidStatus;
+
     } catch (err) {
-      console.error("Contract data fetch error:", err);
+      console.error("Contract info fetch failed:", err);
+      contractInfo = { balance: "Error", playerDeposits: {}, hasPaidStatus: {} };
     }
   }
 
+  // --- Tables ---
   const balanceTable = buildTable(
     ["Contract Balance (ETH)"],
     [{ "Contract Balance (ETH)": contractInfo.balance }]
   );
 
-  const paymentsRows = Object.entries(contractInfo.playerPayments).map(([addr, amt]) => ({
+  const paymentsRows = Object.keys(contractInfo.playerDeposits).map(addr => ({
     player: addr,
-    paid: amt
+    deposit: contractInfo.playerDeposits[addr],
+    hasPaid: contractInfo.hasPaidStatus[addr]
   }));
-  const paymentsTable = buildTable(["player", "paid"], paymentsRows);
+  const paymentsTable = buildTable(["player", "deposit", "hasPaid"], paymentsRows);
 
-  // --- Scores table ---
   const scoreRows = Object.values(snapshot.scores).map(s => ({
     user_address: s.user_address || "",
     profile_name: s.profile_name || "",
@@ -377,7 +400,6 @@ app.get("/admin/db-view", async (req, res) => {
     scoreRows
   );
 
-  // --- Periods table ---
   const periodRows = Object.entries(snapshot.periods).map(([idx, p]) => ({
     periodIndex: idx,
     status: p.status || "",
@@ -391,7 +413,6 @@ app.get("/admin/db-view", async (req, res) => {
     periodRows
   );
 
-  // --- Profile names table ---
   const profileRows = Object.entries(snapshot.profileNames).map(([norm, owner]) => ({
     normalized_name: norm,
     owner_address: owner
@@ -425,7 +446,7 @@ app.get("/admin/db-view", async (req, res) => {
     </div>
 
     <div class="mb-4">
-      <h5>Player Payments</h5>
+      <h5>Player Deposits & Has Paid Status</h5>
       ${paymentsTable}
     </div>
 
@@ -452,6 +473,8 @@ app.get("/admin/db-view", async (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
+
+
 
 
   app.get("/admin/db-download", async (req, res) => {
