@@ -330,16 +330,15 @@ app.get("/admin/db-view", async (req, res) => {
 
   if (opts.contract) {
     const contract = opts.contract;
-
     try {
       // --- Pool balance ---
       try {
-        const poolBN = await contract.poolBalance(); // uint256
-        if (poolBN && ethers.BigNumber.isBigNumber(poolBN)) {
-          contractInfo.balance = ethers.utils.formatEther(poolBN);
-        } else {
-          contractInfo.balance = "0";
-        }
+        const poolBN = await contract.poolBalance?.();
+        contractInfo.balance = poolBN
+          ? ethers.BigNumber.isBigNumber(poolBN)
+            ? ethers.utils.formatEther(poolBN)
+            : String(poolBN)
+          : "0";
       } catch (err) {
         console.error("Error fetching pool balance:", err);
         contractInfo.balance = "Error";
@@ -348,7 +347,7 @@ app.get("/admin/db-view", async (req, res) => {
       // --- Current players ---
       let currentPlayers = [];
       try {
-        const players = await contract.getCurrentPlayers();
+        const players = await contract.getCurrentPlayers?.();
         currentPlayers = Array.isArray(players) ? players : [];
       } catch (err) {
         console.error("Error fetching current players:", err);
@@ -357,13 +356,14 @@ app.get("/admin/db-view", async (req, res) => {
       // --- Player deposits & hasPaid ---
       const playerDeposits = {};
       const hasPaidStatus = {};
-
       for (const addr of currentPlayers) {
         // Deposit
         try {
-          let depositBN = await contract.getPlayerDeposit(addr);
+          let depositBN = await contract.getPlayerDeposit?.(addr);
           depositBN = depositBN ?? ethers.BigNumber.from(0);
-          playerDeposits[addr] = ethers.utils.formatEther(depositBN);
+          playerDeposits[addr] = ethers.BigNumber.isBigNumber(depositBN)
+            ? ethers.utils.formatEther(depositBN)
+            : String(depositBN);
         } catch (err) {
           console.error(`Error fetching deposit for ${addr}:`, err);
           playerDeposits[addr] = "Error";
@@ -371,7 +371,7 @@ app.get("/admin/db-view", async (req, res) => {
 
         // HasPaid
         try {
-          const paid = await contract.hasPaid(addr);
+          const paid = await contract.hasPaid?.(addr);
           hasPaidStatus[addr] = paid ? "Yes" : "No";
         } catch (err) {
           console.error(`Error fetching hasPaid for ${addr}:`, err);
@@ -393,21 +393,21 @@ app.get("/admin/db-view", async (req, res) => {
     [{ "Contract Balance (ETH)": contractInfo.balance }]
   );
 
-  const paymentsRows = Object.keys(contractInfo.playerDeposits).map(addr => ({
+  const paymentsRows = Object.keys(contractInfo.playerDeposits).map((addr) => ({
     player: addr,
     deposit: contractInfo.playerDeposits[addr],
-    hasPaid: contractInfo.hasPaidStatus[addr]
+    hasPaid: contractInfo.hasPaidStatus[addr],
   }));
   const paymentsTable = buildTable(["player", "deposit", "hasPaid"], paymentsRows);
 
-  const scoreRows = Object.values(snapshot.scores).map(s => ({
+  const scoreRows = Object.values(snapshot.scores).map((s) => ({
     user_address: s.user_address || "",
     profile_name: s.profile_name || "",
     email: s.email || "",
     highest_score: String(s.highest_score ?? ""),
     last_score: String(s.last_score ?? ""),
     games_played: String(s.games_played ?? ""),
-    last_updated: s.last_updated || ""
+    last_updated: s.last_updated || "",
   }));
   const scoreTable = buildTable(
     ["user_address", "profile_name", "email", "highest_score", "last_score", "games_played", "last_updated"],
@@ -420,7 +420,7 @@ app.get("/admin/db-view", async (req, res) => {
     txHash: p.txHash || "",
     payouts: p.payouts ? JSON.stringify(p.payouts, null, 0) : "",
     error: p.error || "",
-    updated_at: p.updated_at || ""
+    updated_at: p.updated_at || "",
   }));
   const periodsTable = buildTable(
     ["periodIndex", "status", "txHash", "payouts", "error", "updated_at"],
@@ -429,7 +429,7 @@ app.get("/admin/db-view", async (req, res) => {
 
   const profileRows = Object.entries(snapshot.profileNames).map(([norm, owner]) => ({
     normalized_name: norm,
-    owner_address: owner
+    owner_address: owner,
   }));
   const profileTable = buildTable(["normalized_name", "owner_address"], profileRows);
 
@@ -487,6 +487,7 @@ app.get("/admin/db-view", async (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
+
 
 
 
