@@ -318,7 +318,7 @@ export default function registerAdminRoutes(app, db, opts = {}) {
 app.get("/admin/db-view", async (req, res) => {
   if (!(await isAdminAuthed(req))) return res.redirect("/admin/login");
 
-  // Snapshot from in-memory DB
+  // --- Snapshot from in-memory DB ---
   const snapshot = {
     scores: { ...(db.scores || {}) },
     periods: { ...(db.periods || {}) },
@@ -327,15 +327,17 @@ app.get("/admin/db-view", async (req, res) => {
 
   // --- Contract info ---
   let contractInfo = { balance: "N/A", playerDeposits: {}, hasPaidStatus: {} };
-
   if (opts.contract) {
+    const contract = opts.contract;
     try {
-      const contract = opts.contract;
-
-      // Contract pool balance (ETH)
+      // Pool balance
       try {
-        let balanceBN = await contract.poolBalance();
-        contractInfo.balance = ethers.utils.formatEther(balanceBN);
+        let balanceBN = await contract.poolBalance(); // public uint256 getter
+        if (balanceBN?._isBigNumber) {
+          contractInfo.balance = ethers.utils.formatEther(balanceBN);
+        } else {
+          contractInfo.balance = String(balanceBN ?? 0);
+        }
       } catch (err) {
         console.error("Error fetching balance:", err);
         contractInfo.balance = "Error";
@@ -344,17 +346,15 @@ app.get("/admin/db-view", async (req, res) => {
       // Current players
       let currentPlayers = [];
       try {
-        currentPlayers = Array.isArray(await contract.getCurrentPlayers())
-          ? await contract.getCurrentPlayers()
-          : [];
+        const players = await contract.getCurrentPlayers();
+        currentPlayers = Array.isArray(players) ? players : [];
       } catch (err) {
         console.error("getCurrentPlayers() failed:", err);
       }
 
-      // Player deposits & hasPaid
+      // Player deposits & hasPaid status
       const playerDeposits = {};
       const hasPaidStatus = {};
-
       for (const addr of currentPlayers) {
         // Deposit
         try {
@@ -393,7 +393,7 @@ app.get("/admin/db-view", async (req, res) => {
   const paymentsRows = Object.keys(contractInfo.playerDeposits).map(addr => ({
     player: addr,
     deposit: contractInfo.playerDeposits[addr],
-    hasPaid: contractInfo.hasPaidStatus[addr],
+    hasPaid: contractInfo.hasPaidStatus[addr]
   }));
   const paymentsTable = buildTable(["player", "deposit", "hasPaid"], paymentsRows);
 
@@ -404,7 +404,7 @@ app.get("/admin/db-view", async (req, res) => {
     highest_score: String(s.highest_score ?? ""),
     last_score: String(s.last_score ?? ""),
     games_played: String(s.games_played ?? ""),
-    last_updated: s.last_updated || "",
+    last_updated: s.last_updated || ""
   }));
   const scoreTable = buildTable(
     ["user_address", "profile_name", "email", "highest_score", "last_score", "games_played", "last_updated"],
@@ -417,7 +417,7 @@ app.get("/admin/db-view", async (req, res) => {
     txHash: p.txHash || "",
     payouts: p.payouts ? JSON.stringify(p.payouts, null, 0) : "",
     error: p.error || "",
-    updated_at: p.updated_at || "",
+    updated_at: p.updated_at || ""
   }));
   const periodsTable = buildTable(
     ["periodIndex", "status", "txHash", "payouts", "error", "updated_at"],
@@ -426,7 +426,7 @@ app.get("/admin/db-view", async (req, res) => {
 
   const profileRows = Object.entries(snapshot.profileNames).map(([norm, owner]) => ({
     normalized_name: norm,
-    owner_address: owner,
+    owner_address: owner
   }));
   const profileTable = buildTable(["normalized_name", "owner_address"], profileRows);
 
@@ -484,6 +484,7 @@ app.get("/admin/db-view", async (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
+
 
 
 
