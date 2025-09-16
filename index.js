@@ -241,6 +241,8 @@ app.post("/api/process-now", async (req,res) => {
   try {
     const ts = Date.now()-1000;
     const { periodIndex } = computePeriod(ts, DURATION_MS);
+    console.log("Manual processing of period", periodIndex, new Date().toISOString());
+    console.log(TOP_N, HOUSE_FEE_BPS, GAS_LIMIT);
     await processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, { gasLimit:GAS_LIMIT, pool });
     return res.json({ ok:true, record: db.periods[periodIndex]||null });
   } catch(err) { return res.status(500).json({ ok:false, error:String(err) }); }
