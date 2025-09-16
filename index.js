@@ -236,6 +236,24 @@ app.get("/api/period", (req,res) => {
   } catch(err) { return res.status(500).json({ ok:false, error:String(err) }); }
 });
 
+app.post("/admin/wipe-leaderboard", async (req, res) => {
+  if (!(await isAdminAuthed(req))) return res.status(403).json({ ok:false, error:"Not authorized" });
+  try {
+    await pool.query("BEGIN");
+    await pool.query("DELETE FROM profile_names");
+    await pool.query("DELETE FROM scores");
+    await pool.query("COMMIT");
+    db.scores = {};
+    db.profileNames = {};
+    return res.json({ ok:true, message: "Leaderboard wiped from DB and memory" });
+  } catch (err) {
+    try { await pool.query("ROLLBACK"); } catch(e) {}
+    console.error("wipe-leaderboard error:", err);
+    return res.status(500).json({ ok:false, error:String(err) });
+  }
+});
+
+
 // Process now (force)
 app.post("/api/process-now", async (req,res) => {
   try {
