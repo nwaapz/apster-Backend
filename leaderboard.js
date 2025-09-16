@@ -289,41 +289,31 @@ export async function computeWinnersFromOffchain(contract, db) {
   allScores.sort((a, b) => (b.highest_score || 0) - (a.highest_score || 0));
   const topPlayers = allScores.slice(0, 10); // max 10 players
 
-  // Compute house fee
+  // Compute house fee (30% of the total pool)
   const houseFeeBN = (poolBalanceBN * 30n) / 100n; // 30% for house
-  const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% for players
+  const payoutPoolBN = poolBalanceBN - houseFeeBN; // The 70% of the pool to be distributed
 
-  // Payout percentages
-  const playerPercents = [48, 29, 9, 2, 2, 2, 2, 2, 2, 2];
+  // Payout percentages for top 10 positions
+  const playerPercents = [49, 29, 9, 2, 2, 2, 2, 2, 2, 2];
 
   const winners = [];
   const amounts = [];
   let allocated = 0n;
 
-  // Calculate the total percentage points to be distributed
-  const totalPercentSum = playerPercents.slice(0, topPlayers.length).reduce((a, b) => a + b, 0);
-
-  // Calculate payouts for top players based on their new normalized percentages
+  // Calculate payouts for each winning player using static percentages
   for (let i = 0; i < topPlayers.length; i++) {
     const p = topPlayers[i];
     winners.push(p.user_address);
-
-    const playerSharePercent = playerPercents[i];
     
-    // Normalize percentages based on the number of actual winners
-    const normalizedSharePercent = (playerSharePercent * 100) / totalPercentSum;
-
-    // Use BigInt for precise calculation
-    const share = (payoutPoolBN * BigInt(Math.floor(normalizedSharePercent * 10000))) / 10000n;
+    // Apply the static percentage to the payout pool (70%)
+    const share = (payoutPoolBN * BigInt(playerPercents[i])) / 100n;
     
     amounts.push(share);
     allocated += share;
   }
 
-  // Assign any remaining wei due to integer division to the first player
-  const remainder = payoutPoolBN - allocated;
-  if (remainder > 0n) amounts[0] += remainder;
-
+  // The remaining wei will not be re-distributed and stays in the pool balance
+  
   return {
     winners,
     amounts: amounts.map(a => a.toString()), // array of strings (wei)
