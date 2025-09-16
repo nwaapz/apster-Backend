@@ -246,11 +246,11 @@ app.post("/admin/wipe-leaderboard", async (req, res) => {
     db.scores = {};
     db.profileNames = {};
     return res.json({ ok:true, message: "Leaderboard wiped from DB and memory" });
-  } catch (err) {
-    try { await pool.query("ROLLBACK"); } catch(e) {}
-    console.error("wipe-leaderboard error:", err);
-    return res.status(500).json({ ok:false, error:String(err) });
-  }
+  }  catch (err) {
+      try { await pool.query("ROLLBACK"); } catch(e) {}
+      console.error("wipe-leaderboard error:", err.stack || err);
+      return res.status(500).json({ ok:false, error:String(err) });
+    }
 });
 
 
