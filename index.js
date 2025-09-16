@@ -260,6 +260,25 @@ app.post("/admin/wipe-leaderboard", async (req, res) => {
     }
 });
 
+// In your index.js (development only)
+app.post("/admin/wipe-periods", async (req, res) => {
+  // Simple admin check
+  if (!(req.headers["x-admin-secret"] === process.env.ADMIN_SECRET)) {
+    return res.status(403).json({ ok: false, error: "Not authorized" });
+  }
+
+  try {
+    // Delete all periods from DB and clear in-memory cache
+    await pool.query("DELETE FROM periods");
+    if (db.periods) db.periods = {};
+    return res.json({ ok: true, message: "All periods wiped (DB + memory)" });
+  } catch (err) {
+    console.error("wipe-periods error:", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+
 
 // Process now (force)
 app.post("/api/process-now", async (req,res) => {
