@@ -279,55 +279,51 @@ export async function computeWinnersFromOffchain(contract, db) {
 
   if (poolBalanceBN === 0n) return { winners: [], amounts: [], house: "0", poolBalanceBN: "0" };
 
-  // Get top players (max 10)
+  // Get top players
   const allScores = Object.values(db.scores || {});
   if (!allScores.length) return { winners: [], amounts: [], house: "0", poolBalanceBN: poolBalanceBN.toString() };
 
   allScores.sort((a, b) => (b.highest_score || 0) - (a.highest_score || 0));
-  const topPlayers = allScores.slice(0, 10);
+  const topPlayers = allScores.slice(0, 10); // max 10 players
 
-  // House takes 30%
-  const houseBN = (poolBalanceBN * 30n) / 100n;
-  const payoutPoolBN = poolBalanceBN - houseBN;
+  // Compute house fee
+  const houseFeeBN = (poolBalanceBN * 30n) / 100n; // 30% for house
+  const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% for players
 
-  // Distribution percentages for top players
-  const distPercents = [48, 29, 9]; // 1st, 2nd, 3rd
-  const remaining = topPlayers.length - 3;
-  if (remaining > 0) {
-    const perPlayer = 14 / 7; // 2% each if 7 players
-    for (let i = 0; i < remaining; i++) distPercents.push(perPlayer);
-  }
+  // Base percentages for 10 players
+  const basePercents = [48, 29, 9, 2, 2, 2, 2, 2, 2, 2]; // sum = 100
+  const usedPercents = basePercents.slice(0, topPlayers.length);
 
-  // Adjust for fewer than 10 players
-  const totalPercent = distPercents.slice(0, topPlayers.length).reduce((a, b) => a + b, 0);
-  const adjustedPercents = distPercents.slice(0, topPlayers.length).map(p => (p * 70) / totalPercent);
+  // Normalize to sum = 100 (for the payoutPool)
+  const totalPercent = usedPercents.reduce((a, b) => a + b, 0);
+  const normalizedPercents = usedPercents.map(p => (p * 100) / totalPercent);
 
-  // Compute each player's share in wei
+  // Compute amounts
   const winners = [];
   const amounts = [];
   let allocated = 0n;
-
   for (let i = 0; i < topPlayers.length; i++) {
     const p = topPlayers[i];
     winners.push(p.user_address);
 
-    // Convert percent to BigInt share
-    const share = (payoutPoolBN * BigInt(Math.floor(adjustedPercents[i] * 10000))) / 7000_0n;
+    // multiply payoutPool by normalized percent
+    const share = (payoutPoolBN * BigInt(Math.floor(normalizedPercents[i] * 10000))) / 10000n;
     amounts.push(share);
     allocated += share;
   }
 
-  // Add remainder to first player to ensure exact distribution
+  // Assign remainder (due to integer division) to first player
   const remainder = payoutPoolBN - allocated;
   if (remainder > 0n) amounts[0] += remainder;
 
   return {
     winners,
-    amounts: amounts.map(a => a.toString()),
-    house: houseBN.toString(),
+    amounts: amounts.map(a => a.toString()), // array of strings (wei)
+    house: houseFeeBN.toString(),
     poolBalanceBN: poolBalanceBN.toString()
   };
 }
+
 
 
 
