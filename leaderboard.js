@@ -266,90 +266,70 @@ export function getLeaderboard(db, limit = 10, user = null) {
 // ----------------------- Off-chain computation -----------------------
 
 // Compute winners using off-chain leaderboard, but read poolBalance on-chain to determine amounts
-export async function computeWinnersFromOffchain(contract, db, TOP_N, HOUSE_FEE_BPS) {
-  // read current players from DB (off-chain leaderboard) and on-chain pool balance
-  // ensure contract exists and poolBalance can be read
+export async function computeWinnersFromOffchain(contract, db) {
+  // Read pool balance from contract
   let poolBalanceBN = 0n;
   try {
     const pb = await contract.poolBalance();
-    // pb may be bigint already (ethers v6) or a BigNumber-like
     poolBalanceBN = typeof pb === "bigint" ? pb : BigInt(pb?.toString?.() ?? "0");
   } catch (err) {
-    // If we can't read poolBalance, return empty result
-    console.error("computeWinnersFromOffchain: cannot read poolBalance:", err);
-    return { winners: [], amounts: [], house1: "0", house2: "0", poolBalanceBN: "0" };
+    console.error("Cannot read poolBalance:", err);
+    return { winners: [], amounts: [], house: "0", poolBalanceBN: "0" };
   }
 
-  if (poolBalanceBN === 0n) return { winners: [], amounts: [], house1: "0", house2: "0", poolBalanceBN: "0" };
+  if (poolBalanceBN === 0n) return { winners: [], amounts: [], house: "0", poolBalanceBN: "0" };
 
-  // Get top players from off-chain scores in db
+  // Get top players
   const allScores = Object.values(db.scores || {});
-  if (!allScores || allScores.length === 0) {
-    return { winners: [], amounts: [], house1: "0", house2: "0", poolBalanceBN: poolBalanceBN.toString() };
-  }
+  if (!allScores.length) return { winners: [], amounts: [], house: "0", poolBalanceBN: poolBalanceBN.toString() };
 
-  // Sort by highest_score descending
   allScores.sort((a, b) => (b.highest_score || 0) - (a.highest_score || 0));
-  const topPlayers = allScores.slice(0, TOP_N);
+  const topPlayers = allScores.slice(0, 10); // max 10 players
 
-  if (topPlayers.length === 0) {
-    return { winners: [], amounts: [], house1: "0", house2: "0", poolBalanceBN: poolBalanceBN.toString() };
+  // Compute house fee
+  const houseFeeBN = (poolBalanceBN * 30n) / 100n; // 30%
+  const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% to top 10
+
+  // Distribution percentages of payoutPool
+  const distributionPercents = [
+    48, // 1st
+    29, // 2nd
+    9   // 3rd
+  ];
+  const remainingPlayers = topPlayers.length - 3;
+  if (remainingPlayers > 0) {
+    const perPlayer = 14 / 7; // 2% each
+    for (let i = 0; i < remainingPlayers; i++) distributionPercents.push(perPlayer);
   }
 
-  // Compute house fee and payout pool
-  const houseFeeTotal = (poolBalanceBN * BigInt(HOUSE_FEE_BPS)) / 10000n; // e.g. 20% -> 2000/10000
-  const payoutPool = poolBalanceBN - houseFeeTotal;
+  // Adjust in case less than 10 players
+  const totalDist = distributionPercents.slice(0, topPlayers.length).reduce((a, b) => a + b, 0);
+  const adjustedPercents = distributionPercents.slice(0, topPlayers.length).map(p => (p * 70) / totalDist); // scale to 70%
 
-  // Sum scores among top players (for proportional split)
-  let totalScore = 0n;
-  for (const p of topPlayers) totalScore += BigInt(p.highest_score || 0);
-
-  // Create winners & amounts in wei (BigInt)
+  // Compute amounts
   const winners = [];
-  const amountsBi = [];
+  const amounts = [];
   let allocated = 0n;
-
-  if (totalScore > 0n) {
-    for (let i = 0; i < topPlayers.length; i++) {
-      const p = topPlayers[i];
-      winners.push(p.user_address);
-      // floor division for each share
-      const share = (payoutPool * BigInt(p.highest_score || 0)) / totalScore;
-      amountsBi.push(share);
-      allocated += share;
-    }
-  } else {
-    // if all scores 0, split equally
-    const each = payoutPool / BigInt(topPlayers.length);
-    for (let i = 0; i < topPlayers.length; i++) {
-      winners.push(topPlayers[i].user_address);
-      amountsBi.push(each);
-      allocated += each;
-    }
+  for (let i = 0; i < topPlayers.length; i++) {
+    const p = topPlayers[i];
+    winners.push(p.user_address);
+    const share = (payoutPoolBN * BigInt(Math.floor(adjustedPercents[i] * 10000))) / 7000_0n; 
+    amounts.push(share);
+    allocated += share;
   }
 
-  // Remainder due to integer division: assign to top (or last) to ensure full distribution
-  const remainder = payoutPool - allocated;
-  if (remainder > 0n) {
-    // add remainder to the first winner (highest score) to keep deterministic
-    amountsBi[0] = amountsBi[0] + remainder;
-  }
-
-  // Split house fee between two house wallets 50/50 (you can change split rules)
-  const house1 = houseFeeTotal / 2n;
-  const house2 = houseFeeTotal - house1; // remainder to house2 if odd
-
-  // Convert amounts to decimal string representation (wei) for returning
-  const amounts = amountsBi.map(a => a.toString());
+  // Assign remainder to first player
+  const remainder = payoutPoolBN - allocated;
+  if (remainder > 0n) amounts[0] += remainder;
 
   return {
     winners,
-    amounts,            // array of strings (wei) suitable for passing to contract.payPlayers
-    house1: house1.toString(),
-    house2: house2.toString(),
+    amounts: amounts.map(a => a.toString()),
+    house: houseFeeBN.toString(),
     poolBalanceBN: poolBalanceBN.toString()
   };
 }
+
 // ----------------------- Period processing (off-chain payouts) -----------------------
 export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, opts = {}) {
   const pool = opts.pool;
