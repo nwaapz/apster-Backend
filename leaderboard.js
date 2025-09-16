@@ -288,47 +288,47 @@ export async function computeWinnersFromOffchain(contract, db) {
 
   // Compute house fee
   const houseFeeBN = (poolBalanceBN * 30n) / 100n; // 30%
-  const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% to top 10
+  const payoutPoolBN = poolBalanceBN - houseFeeBN; // 70% to top players
 
-  // Distribution percentages of payoutPool
-  const distributionPercents = [
-    48, // 1st
-    29, // 2nd
-    9   // 3rd
-  ];
+  // Distribution percentages
+  const distributionPercents: bigint[] = [48n, 29n, 9n]; // first 3 players
   const remainingPlayers = topPlayers.length - 3;
   if (remainingPlayers > 0) {
-    const perPlayer = 14 / 7; // 2% each
-    for (let i = 0; i < remainingPlayers; i++) distributionPercents.push(perPlayer);
+    for (let i = 0; i < remainingPlayers; i++) distributionPercents.push(2n); // 2% each
   }
 
-  // Adjust in case less than 10 players
-  const totalDist = distributionPercents.slice(0, topPlayers.length).reduce((a, b) => a + b, 0);
-  const adjustedPercents = distributionPercents.slice(0, topPlayers.length).map(p => (p * 70) / totalDist); // scale to 70%
+  // Only take as many percentages as players exist
+  const percents = distributionPercents.slice(0, topPlayers.length);
 
-  // Compute amounts
-  const winners = [];
-  const amounts = [];
+  // Compute total percent
+  const totalPercent = percents.reduce((a, b) => a + b, 0n);
+
+  // Compute payouts
+  const winners: string[] = [];
+  const amounts: bigint[] = [];
   let allocated = 0n;
+
   for (let i = 0; i < topPlayers.length; i++) {
     const p = topPlayers[i];
     winners.push(p.user_address);
-    const share = (payoutPoolBN * BigInt(Math.floor(adjustedPercents[i] * 10000))) / 7000_0n; 
+
+    const share = (payoutPoolBN * percents[i]) / totalPercent;
     amounts.push(share);
     allocated += share;
   }
 
-  // Assign remainder to first player
+  // Assign any remainder to first player to ensure exact payout
   const remainder = payoutPoolBN - allocated;
   if (remainder > 0n) amounts[0] += remainder;
 
   return {
     winners,
-    amounts: amounts.map(a => a.toString()),
+    amounts: amounts.map(a => a.toString()), // convert to string for on-chain
     house: houseFeeBN.toString(),
     poolBalanceBN: poolBalanceBN.toString()
   };
 }
+
 
 // ----------------------- Period processing (off-chain payouts) -----------------------
 export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_BPS, opts = {}) {
