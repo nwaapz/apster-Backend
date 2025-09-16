@@ -40,6 +40,25 @@ const TOP_N = Number(process.env.TOP_N || 3);
 const GAS_LIMIT = Number(process.env.GAS_LIMIT || 2_000_000);
 const ADMIN_SECRET = process.env.ADMIN_SECRET || null;
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // Basic env validation for on-chain parts (if you're running without contract, set env accordingly)
 if (!CONTRACT_ADDRESS || !RPC_URL || !PRIVATE_KEY) {
   console.error("Set CONTRACT_ADDRESS, RPC_URL, PRIVATE_KEY in .env (or disable on-chain features).");
@@ -57,6 +76,38 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, contractJson.abi, ownerWallet);
 const readOnlyContract = new ethers.Contract(CONTRACT_ADDRESS, contractJson.abi, provider);
+
+
+
+
+// --- TEST FUNCTION TO CHECK CONTRACT ACCESS ---
+async function testContractAccess() {
+  try {
+    const owner = await readOnlyContract.owner();
+    console.log("✅ Contract Owner:", owner);
+
+    const poolBalance = await readOnlyContract.poolBalance();
+    console.log("✅ Pool Balance:", poolBalance.toString());
+
+    const player = "0x9ACB85e48eE65018D14913eD4bEFdCd3517680ad";
+    const hasPaid = await readOnlyContract.hasPaid(player);
+    console.log(`✅ Has Paid (${player}):`, hasPaid);
+
+    const deposit = await readOnlyContract.getPlayerDeposit(player);
+    console.log(`✅ Deposit (${player}):`, deposit.toString());
+
+    const currentPlayers = await readOnlyContract.getCurrentPlayers();
+    console.log("✅ Current Players:", currentPlayers);
+
+    console.log("✅ Contract access test passed!");
+  } catch (err) {
+    console.error("❌ Contract access test failed:", err);
+  }
+}
+
+
+// Run the test before starting Express
+await testContractAccess();
 
 
 // --- Postgres pool ---
