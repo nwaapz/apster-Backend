@@ -77,7 +77,7 @@ app.use(cors());
 app.use(express.json());
 
 // Register admin routes, provide pool to adminRoutes
-import WagerPoolSingleEntryABI from "./abi/WagerPoolSingleEntry.json" assert { type: "json" };
+
 
 registerAdminRoutes(app, db, {
   pool,
