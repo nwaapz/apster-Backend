@@ -13,40 +13,64 @@ export default function registerAdminRoutes(app, db, opts = {}) {
 
   // --- Helper DB functions for admin settings & sessions ---
   async function loadAdminSettings() {
-    const r = await pool.query(`SELECT v FROM admin_settings WHERE k = 'passwordHash' LIMIT 1`);
-    if (r.rowCount === 0) return { passwordHash: null };
-    const v = r.rows[0].v;
-    return { passwordHash: v?.hash ?? null };
-  }
+  const r = await pool.query(
+    `SELECT v FROM admin_settings WHERE k = 'passwordHash' LIMIT 1`
+  );
+  if (r.rowCount === 0) return { passwordHash: null };
 
-  async function saveAdminSettings(adminData) {
-    // adminData = { passwordHash: '...' }
-    const v = { hash: adminData.passwordHash || null };
-    await pool.query(`
-      INSERT INTO admin_settings(k, v) VALUES('passwordHash', $1)
-      ON CONFLICT(k) DO UPDATE SET v = EXCLUDED.v
-    `, [v]);
-  }
+  let v = r.rows[0].v;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      v = { hash: v }; // fallback if plain string
+    }
+  }
+  return { passwordHash: v?.hash ?? null };
+}
 
-  async function createAdminSession(token, ttlMs) {
-    const created = new Date();
-    const expires = new Date(Date.now() + ttlMs);
-    await pool.query(
-      `INSERT INTO admin_sessions(token, created_at, expires_at) VALUES($1,$2,$3)
-       ON CONFLICT(token) DO UPDATE SET created_at = EXCLUDED.created_at, expires_at = EXCLUDED.expires_at`,
-      [token, created.toISOString(), expires.toISOString()]
-    );
-  }
+ async function saveAdminSettings(adminData) {
+  const v = JSON.stringify({ hash: adminData.passwordHash || null });
+  await pool.query(
+    `INSERT INTO admin_settings(k, v)
+     VALUES('passwordHash', $1)
+     ON CONFLICT(k) DO UPDATE SET v = EXCLUDED.v`,
+    [v]
+  );
+}
 
-  async function getAdminSession(token) {
-    if (!token) return null;
-    // Remove expired sessions first (optional)
-    await pool.query(`DELETE FROM admin_sessions WHERE expires_at < NOW()`);
-    const r = await pool.query(`SELECT token, created_at, expires_at FROM admin_sessions WHERE token = $1 LIMIT 1`, [token]);
-    if (r.rowCount === 0) return null;
-    const row = r.rows[0];
-    return { token: row.token, createdAt: new Date(row.created_at).toISOString(), expiresAt: new Date(row.expires_at).toISOString() };
-  }
+async function createAdminSession(token, ttlMs) {
+  const created = new Date();
+  const expires = new Date(Date.now() + ttlMs);
+
+  await pool.query(
+    `INSERT INTO admin_sessions(token, created_at, expires_at)
+     VALUES($1, $2, $3)
+     ON CONFLICT(token)
+     DO UPDATE SET created_at = EXCLUDED.created_at,
+                   expires_at = EXCLUDED.expires_at`,
+    [token, created, expires] // pass Date directly if TIMESTAMP columns
+  );
+}
+
+async function getAdminSession(token) {
+  if (!token) return null;
+  await pool.query(`DELETE FROM admin_sessions WHERE expires_at < NOW()`);
+
+  const r = await pool.query(
+    `SELECT token, created_at, expires_at
+     FROM admin_sessions WHERE token = $1 LIMIT 1`,
+    [token]
+  );
+  if (r.rowCount === 0) return null;
+
+  const row = r.rows[0];
+  return {
+    token: row.token,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    expiresAt: row.expires_at instanceof Date ? row.expires_at.toISOString() : String(row.expires_at),
+  };
+}
 
   async function deleteAdminSession(token) {
     if (!token) return;
