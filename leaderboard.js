@@ -299,7 +299,12 @@ export async function processPeriod(contract, db, periodIndex, TOP_N, HOUSE_FEE_
   const pool = opts.pool;
   if (!db.periods) db.periods = {};
   const existing = db.periods[periodIndex];
-  if (existing?.status === "processing" || existing?.status === "paid") return;
+  if (existing?.status === "processing" || existing?.status === "paid")
+    {
+
+      console.log(`Period ${periodIndex} is already being processed or paid.`);
+      return;
+    } 
 
   const nowIso = new Date().toISOString();
   db.periods[periodIndex] = { status: "processing", updated_at: nowIso };
