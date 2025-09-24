@@ -19,6 +19,57 @@ import {
   getLeaderboard
 } from "./leaderboard.js";
 import registerAdminRoutes from "./adminRoutes.js";
+import { keccak256, toUtf8Bytes } from "ethers";
+// ===== session + deterministic board helpers =====
+import crypto from "crypto";
+
+// in-memory sessions (persist to DB in prod)
+const SESSIONS = new Map(); // sessionId -> { user, seed, board, createdAt, used }
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 20); // 20 min default
+
+function createSessionId() { return crypto.randomBytes(12).toString('hex'); }
+function nowMs() { return Date.now(); }
+
+// simple seeded RNG (mulberry32) - keep deterministic across Node & C# ports
+function mulberry32(seed) {
+  let t = seed >>> 0;
+  return function() {
+    t += 0x6D2B79F5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ensureVerifiedPlaysTable.js  (paste into index.js or import from a util file)
+async function ensureVerifiedPlaysTable(pool) {
+  const sql = `
+  -- table
+CREATE TABLE IF NOT EXISTS verified_plays (
+  id BIGSERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  user_address TEXT NOT NULL,
+  replay_hash TEXT NOT NULL,
+  score INTEGER NOT NULL,
+  kills INTEGER,
+  survival_ticks INTEGER,
+  raw_replay JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_verified_plays_replay_hash
+  ON verified_plays (replay_hash);
+  `;
+  try {
+    await pool.query(sql);
+    console.log("✅ verified_plays table ensured (exists or created).");
+  } catch (err) {
+    console.error("❌ Failed to ensure verified_plays table:", err);
+    throw err;
+  }
+}
+
+
 
 // simple admin check using x-admin-secret header
 async function isAdminAuthed(req) {
@@ -39,21 +90,6 @@ const HOUSE_FEE_BPS = Number(process.env.HOUSE_FEE_BPS || 100);
 const TOP_N = Number(process.env.TOP_N || 3);
 const GAS_LIMIT = Number(process.env.GAS_LIMIT || 2_000_000);
 const ADMIN_SECRET = process.env.ADMIN_SECRET || null;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -131,10 +167,19 @@ try {
   process.exit(1);
 }
 
+try {
+  await ensureVerifiedPlaysTable(pool);
+} catch (err) {
+  console.error("Failed DB pre-checks (ensureVerifiedPlaysTable):", err);
+  process.exit(1);
+}
+
 // --- Express ---
 const app = express();
+
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '3mb' }));
 
 // Register admin routes, provide pool to adminRoutes
 
@@ -151,6 +196,54 @@ registerAdminRoutes(app, db, {
 
 // Root
 app.get("/", (req,res) => res.send("✅ Backend running (Postgres)!"));
+
+
+
+// Start a session - server returns the authoritative board and seed
+app.post("/api/start-session", async (req, res) => {
+  try {
+    const sessionId = ethers.hexlify(ethers.randomBytes(16)); // unique
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
+    SESSIONS.set(sessionId, { used: false, expiresAt });
+    res.json({ sessionId, expiresAt });
+  } catch (err) {
+    console.error("start-session error:", err);
+    res.status(500).json({ error: "could not start session" });
+  }
+});
+
+
+// Submit replay - server verifies deterministically
+app.post("/api/submit-replay", async (req, res) => {
+  try {
+    const { sessionId, replay, score, kills, survivalTicks, userAddress } = req.body;
+    if (!sessionId || !Array.isArray(replay) || typeof score !== "number") {
+      return res.status(400).json({ error: "invalid payload" });
+    }
+
+    const s = SESSIONS.get(sessionId);
+    if (!s || s.used || Date.now() > s.expiresAt) {
+      return res.status(400).json({ error: "invalid or expired session" });
+    }
+
+    // Minimal anti-cheat: hash replay for immutability
+    const rHash = keccak256(toUtf8Bytes(JSON.stringify(replay)));
+
+    await pool.query(
+      `INSERT INTO verified_plays (session_id, user_address, replay_hash, score, kills, survival_ticks, raw_replay, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+      [sessionId, userAddress || "unknown", rHash, score, kills || 0, survivalTicks || 0, JSON.stringify(replay)]
+    );
+
+    s.used = true; // mark session consumed
+    res.json({ success: true, replayHash: rHash });
+  } catch (err) {
+    console.error("submit-replay error:", err);
+    res.status(500).json({ error: "could not submit replay" });
+  }
+});
+
+
 
 // Submit score (now accepts optional 'level' + profile_name + email)
 app.post("/api/submit-score", async (req,res) => {
