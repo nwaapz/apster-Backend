@@ -220,37 +220,56 @@ app.post("/api/start-session", async (req, res) => {
 app.post("/api/submit-replay", async (req, res) => {
   try {
     const { sessionId, userAddress, replay, profile_name, email, level } = req.body;
+
+    // --- Validate input payload ---
     if (!sessionId || !replay) {
+      console.warn(`[ReplaySubmit] Missing sessionId or replay. Payload:`, req.body);
       return res.status(400).json({ error: "missing sessionId or replay" });
     }
 
+    // --- Session validation ---
     const s = SESSIONS.get(sessionId);
-    if (!s || s.used || Date.now() > s.expiresAt) {
-      return res.status(400).json({ error: "invalid or expired session" });
+    if (!s) {
+      console.warn(`[ReplaySubmit] Session not found: ${sessionId}`);
+      return res.status(400).json({ error: "session not found" });
+    }
+    if (s.used) {
+      console.warn(`[ReplaySubmit] Session already used: ${sessionId}`);
+      return res.status(400).json({ error: "session already used" });
+    }
+    const now = Date.now();
+    if (now > s.expiresAt) {
+      const diff = now - s.expiresAt;
+      console.warn(`[ReplaySubmit] Session expired ${diff}ms ago. SessionId=${sessionId}`);
+      return res.status(400).json({ error: `session expired ${diff}ms ago` });
     }
 
-    // Validate replay shape
+    // --- Replay shape validation ---
     if (!Array.isArray(replay)) {
+      console.warn(`[ReplaySubmit] Replay not array. SessionId=${sessionId}`);
       return res.status(400).json({ error: "replay must be an array" });
     }
     const MAX_ENTRIES = 5000;
     if (replay.length === 0 || replay.length > MAX_ENTRIES) {
+      console.warn(`[ReplaySubmit] Replay length invalid (${replay.length}). SessionId=${sessionId}`);
       return res.status(400).json({ error: `replay must have 1..${MAX_ENTRIES} entries` });
     }
 
-    // Validate entries
+    // --- Replay entries validation ---
     let lastTime = -1;
     let monotonic = true;
     const scores = [];
     for (let i = 0; i < replay.length; i++) {
       const ev = replay[i];
       if (!ev || typeof ev !== "object") {
-        return res.status(400).json({ error: "replay entries must be objects" });
+        console.warn(`[ReplaySubmit] Invalid entry at index ${i}:`, ev);
+        return res.status(400).json({ error: `invalid entry at index ${i}` });
       }
 
       const t = Number(ev.time);
       const sc = Number(ev.score);
       if (!Number.isFinite(t) || t < 0 || !Number.isFinite(sc) || sc < 0) {
+        console.warn(`[ReplaySubmit] Invalid time/score at index ${i}. time=${ev.time}, score=${ev.score}`);
         return res.status(400).json({ error: `invalid time/score at index ${i}` });
       }
 
@@ -259,26 +278,29 @@ app.post("/api/submit-replay", async (req, res) => {
       lastTime = t;
     }
 
-    // Canonicalize + hash
+    // --- Canonicalize & hash replay ---
     const canonical = stringify(replay);
     const rHash = keccak256(toUtf8Bytes(canonical));
 
-    // Compute final score (server authoritative)
+    // --- Compute final score ---
     const lastEntryScore = scores[scores.length - 1];
     const maxScore = Math.max(...scores);
     const serverScore = monotonic ? lastEntryScore : maxScore;
     const serverSurvival = lastTime;
 
-    // Prevent duplicate replays
+    console.log(`[ReplaySubmit] Session=${sessionId}, User=${userAddress}, FinalScore=${serverScore}, Entries=${replay.length}, Monotonic=${monotonic}`);
+
+    // --- Duplicate replay check ---
     const dupCheck = await pool.query(
       "SELECT id FROM verified_plays WHERE replay_hash = $1",
       [rHash]
     );
     if (dupCheck.rows.length) {
+      console.warn(`[ReplaySubmit] Duplicate replay detected. Hash=${rHash}`);
       return res.status(409).json({ error: "replay already submitted", replayHash: rHash });
     }
 
-    // Save verified replay into DB
+    // --- Save replay in DB ---
     await pool.query(
       `INSERT INTO verified_plays 
         (session_id, user_address, replay_hash, score, kills, survival_ticks, raw_replay, created_at)
@@ -288,17 +310,18 @@ app.post("/api/submit-replay", async (req, res) => {
         (userAddress || "unknown").toString().trim().toLowerCase(),
         rHash,
         serverScore,
-        null,         // kills not tracked yet
+        null, // kills not tracked yet
         serverSurvival,
         canonical
       ]
     );
 
-    // Mark session as used
+    // --- Mark session as used ---
     s.used = true;
     SESSIONS.delete(sessionId);
+    console.log(`[ReplaySubmit] Session ${sessionId} marked used & deleted`);
 
-    // 🔥 Update leaderboard / in-memory db just like submit-score
+    // --- Update in-memory leaderboard ---
     const addr = String(userAddress || "unknown").trim().toLowerCase();
     const intScore = Math.floor(Number(serverScore) || 0);
     const intLevel = Number.isFinite(Number(level))
@@ -329,6 +352,7 @@ app.post("/api/submit-replay", async (req, res) => {
     db.scores[addr].last_updated = new Date().toISOString();
 
     await saveScore(pool, db, db.scores[addr]);
+    console.log(`[ReplaySubmit] Leaderboard updated. User=${addr}, Score=${intScore}, Level=${intLevel}`);
 
     return res.json({
       ok: true,
@@ -339,10 +363,11 @@ app.post("/api/submit-replay", async (req, res) => {
         : "accepted (non-monotonic times; validated using max score)"
     });
   } catch (err) {
-    console.error("submit-replay error:", err);
+    console.error("[ReplaySubmit] Unexpected error:", err);
     return res.status(500).json({ ok: false, error: String(err) });
   }
 });
+
 
 
 
