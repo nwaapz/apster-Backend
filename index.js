@@ -201,11 +201,16 @@ app.get("/", (req,res) => res.send("✅ Backend running (Postgres)!"));
 
 
 // Start a session - server returns the authoritative board and seed
+// --- Start session ---
 app.post("/api/start-session", async (req, res) => {
   try {
     const sessionId = ethers.hexlify(ethers.randomBytes(16)); // unique
-    const expiresAt = Date.now() + 22 * 60 * 1000; // 10 min
+    const expiresAt = Date.now() + 22 * 60 * 1000; // 22 min
     SESSIONS.set(sessionId, { used: false, expiresAt });
+
+    console.log(`[StartSession] New session created: 
+      SessionId=${sessionId}, ExpiresAt=${new Date(expiresAt).toISOString()}`);
+
     res.json({ sessionId, expiresAt });
   } catch (err) {
     console.error("start-session error:", err);
@@ -214,12 +219,16 @@ app.post("/api/start-session", async (req, res) => {
 });
 
 
-// Submit replay - server verifies deterministically
-// Submit replay - server verifies deterministically and updates leaderboard just like /submit-score
-// Submit replay - server verifies deterministically and updates leaderboard just like /submit-score
+// --- Submit replay ---
 app.post("/api/submit-replay", async (req, res) => {
   try {
     const { sessionId, userAddress, replay, profile_name, email, level } = req.body;
+
+    // --- Dump all current sessions for debugging ---
+    console.log("[ReplaySubmit] Current sessions in memory:");
+    for (const [id, s] of SESSIONS.entries()) {
+      console.log(`   ${id} | used=${s.used} | expiresAt=${new Date(s.expiresAt).toISOString()}`);
+    }
 
     // --- Validate input payload ---
     if (!sessionId || !replay) {
