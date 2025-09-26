@@ -264,7 +264,7 @@ app.post("/api/submit-replay", async (req, res) => {
       return res.status(400).json({ error: `replay must have 1..${MAX_ENTRIES} entries` });
     }
 
-    // --- Replay entries validation ---
+    // --- Replay entries validation & integer conversion ---
     let lastTime = -1;
     let monotonic = true;
     const scores = [];
@@ -275,41 +275,52 @@ app.post("/api/submit-replay", async (req, res) => {
         return res.status(400).json({ error: `invalid entry at index ${i}` });
       }
 
-      const t = Number(ev.time);
-      const sc = Number(ev.score);
-      if (!Number.isFinite(t) || t < 0 || !Number.isFinite(sc) || sc < 0) {
-        console.warn(`[ReplaySubmit] Invalid time/score at index ${i}. time=${ev.time}, score=${ev.score}`);
+      // convert to numbers then to integers (floor)
+      const tRaw = Number(ev.time);
+      const scRaw = Number(ev.score);
+      if (!Number.isFinite(tRaw) || !Number.isFinite(scRaw)) {
+        console.warn(`[ReplaySubmit] Non-numeric time/score at index ${i}. time=${ev.time}, score=${ev.score}`);
         return res.status(400).json({ error: `invalid time/score at index ${i}` });
       }
 
-      scores.push(Math.floor(sc));
+      const t = Math.floor(tRaw);
+      const sc = Math.floor(scRaw);
+
+      if (t < 0 || sc < 0) {
+        console.warn(`[ReplaySubmit] Negative time/score at index ${i}. time=${t}, score=${sc}`);
+        return res.status(400).json({ error: `invalid time/score at index ${i}` });
+      }
+
+      // overwrite replay entry with sanitized ints (so canonicalization/hashing uses ints)
+      ev.time = t;
+      ev.score = sc;
+
+      scores.push(sc);
       if (t < lastTime) monotonic = false;
       lastTime = t;
     }
 
-    // --- Canonicalize & hash replay ---
+    // --- Canonicalize & hash replay (using sanitized ints) ---
     const canonical = stringify(replay);
     const rHash = keccak256(toUtf8Bytes(canonical));
 
-    // --- Compute final score ---
+    // --- Compute final score (integers now) ---
     const lastEntryScore = scores[scores.length - 1];
     const maxScore = Math.max(...scores);
     const serverScore = monotonic ? lastEntryScore : maxScore;
-    const serverSurvival = lastTime;
+    const serverScoreInt = Math.floor(serverScore);
+    const serverSurvivalInt = Math.floor(lastTime);
 
-    console.log(`[ReplaySubmit] Session=${sessionId}, User=${userAddress}, FinalScore=${serverScore}, Entries=${replay.length}, Monotonic=${monotonic}`);
+    console.log(`[ReplaySubmit] Session=${sessionId}, User=${userAddress}, FinalScore=${serverScoreInt}, Entries=${replay.length}, Monotonic=${monotonic}`);
 
     // --- Duplicate replay check ---
-    const dupCheck = await pool.query(
-      "SELECT id FROM verified_plays WHERE replay_hash = $1",
-      [rHash]
-    );
+    const dupCheck = await pool.query("SELECT id FROM verified_plays WHERE replay_hash = $1", [rHash]);
     if (dupCheck.rows.length) {
       console.warn(`[ReplaySubmit] Duplicate replay detected. Hash=${rHash}`);
       return res.status(409).json({ error: "replay already submitted", replayHash: rHash });
     }
 
-    // --- Save replay in DB ---
+    // --- Save replay in DB (use integers) ---
     await pool.query(
       `INSERT INTO verified_plays 
         (session_id, user_address, replay_hash, score, kills, survival_ticks, raw_replay, created_at)
@@ -318,9 +329,9 @@ app.post("/api/submit-replay", async (req, res) => {
         sessionId,
         (userAddress || "unknown").toString().trim().toLowerCase(),
         rHash,
-        serverScore,
-        null, // kills not tracked yet
-        serverSurvival,
+        serverScoreInt,     // INTEGER
+        null,               // kills not tracked yet
+        serverSurvivalInt,  // INTEGER
         canonical
       ]
     );
@@ -330,12 +341,10 @@ app.post("/api/submit-replay", async (req, res) => {
     SESSIONS.delete(sessionId);
     console.log(`[ReplaySubmit] Session ${sessionId} marked used & deleted`);
 
-    // --- Update in-memory leaderboard ---
+    // --- Update in-memory leaderboard (same logic as /api/submit-score) ---
     const addr = String(userAddress || "unknown").trim().toLowerCase();
-    const intScore = Math.floor(Number(serverScore) || 0);
-    const intLevel = Number.isFinite(Number(level))
-      ? Math.max(1, Math.floor(Number(level)))
-      : (db.scores?.[addr]?.level || 1);
+    const intScore = serverScoreInt;
+    const intLevel = Number.isFinite(Number(level)) ? Math.max(1, Math.floor(Number(level))) : (db.scores?.[addr]?.level || 1);
 
     if (!db.scores) db.scores = {};
     db.scores[addr] = db.scores[addr] || {
@@ -367,15 +376,14 @@ app.post("/api/submit-replay", async (req, res) => {
       ok: true,
       replayHash: rHash,
       saved: db.scores[addr],
-      message: monotonic
-        ? "accepted"
-        : "accepted (non-monotonic times; validated using max score)"
+      message: monotonic ? "accepted" : "accepted (non-monotonic times; validated using max score)"
     });
   } catch (err) {
     console.error("[ReplaySubmit] Unexpected error:", err);
     return res.status(500).json({ ok: false, error: String(err) });
   }
 });
+
 
 
 
